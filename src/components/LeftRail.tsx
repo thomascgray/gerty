@@ -1,14 +1,15 @@
 import { useState, type ComponentType } from 'react'
-import type { TimelineObjectType, AssetMeta } from '../types'
+import type { TimelineObjectType, AssetMeta, VideoEffectKind } from '../types'
 import { getAssetUrl } from '../lib/assetStore'
 import {
   IconPhoto, IconTypography, IconShape, IconZoomScan,
   IconArrowUpRight, IconScribble, IconPhotoPlus, IconMusic,
-  IconChevronLeft, IconChevronRight, type IconProps,
+  IconChevronLeft, IconChevronRight, IconSparkles,
+  IconContrast, IconDroplet, IconColorSwatch, IconVignette, IconGrain, IconMovie, type IconProps,
 } from '@tabler/icons-react'
 
 type TablerIcon = ComponentType<IconProps>
-type RailSection = 'media' | 'text' | 'elements' | 'zoom'
+type RailSection = 'media' | 'text' | 'elements' | 'effects'
 
 type LeftRailProps = {
   assets: AssetMeta[]
@@ -16,13 +17,14 @@ type LeftRailProps = {
   onAddAsset: (assetId: string) => void     // re-add an already-imported asset
   onCreateObject: (type: TimelineObjectType) => void
   onCreateZoom: () => void
+  onCreateEffect: (kind: VideoEffectKind) => void  // spec 23: colour/overlay effects
 }
 
 const SECTIONS: { id: RailSection; label: string; Icon: TablerIcon }[] = [
   { id: 'media', label: 'Media', Icon: IconPhoto },
   { id: 'text', label: 'Text', Icon: IconTypography },
   { id: 'elements', label: 'Elements', Icon: IconShape },
-  { id: 'zoom', label: 'Zoom', Icon: IconZoomScan },
+  { id: 'effects', label: 'Effects', Icon: IconSparkles },
 ]
 
 /**
@@ -30,7 +32,7 @@ const SECTIONS: { id: RailSection; label: string; Icon: TablerIcon }[] = [
  * Subsumes the old header creation clusters and the "+ Asset" trigger, and adds a basic re-addable
  * media library. Collapsible to just the icon rail. Ephemeral view-state (not persisted).
  */
-export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateObject, onCreateZoom }: LeftRailProps) {
+export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateObject, onCreateZoom, onCreateEffect }: LeftRailProps) {
   const [section, setSection] = useState<RailSection>('media')
   const [open, setOpen] = useState(true)
 
@@ -96,9 +98,15 @@ export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateObjec
               { label: 'Pen', Icon: IconScribble, onClick: () => onCreateObject('freehand') },
             ]} />
           )}
-          {section === 'zoom' && (
-            <SimpleSection title="Animations" items={[
+          {section === 'effects' && (
+            <SimpleSection title="Effects" items={[
               { label: 'Camera zoom', Icon: IconZoomScan, onClick: onCreateZoom },
+              { label: 'Black & white', Icon: IconContrast, onClick: () => onCreateEffect('grayscale') },
+              { label: 'Sepia', Icon: IconDroplet, onClick: () => onCreateEffect('sepia') },
+              { label: 'Invert', Icon: IconColorSwatch, onClick: () => onCreateEffect('invert') },
+              { label: 'Vignette', Icon: IconVignette, onClick: () => onCreateEffect('vignette') },
+              { label: 'Film grain', Icon: IconGrain, onClick: () => onCreateEffect('grain') },
+              { label: 'Old film', Icon: IconMovie, onClick: () => onCreateEffect('oldfilm') },
             ]} />
           )}
         </div>

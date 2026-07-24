@@ -2,10 +2,11 @@ import { useState } from 'react'
 import {
   IconClock, IconArrowsMove, IconVector, IconLogin, IconLogout, IconDiamond,
   IconVolume, IconPalette, IconTypography, IconArrowUpRight, IconFocusCentered, IconChevronDown,
+  IconSparkles,
 } from '@tabler/icons-react'
 import type {
   TimelineObject, ProjectAction, ArrowData, AudioData, VideoData, TextData, TextAlign,
-  AnimatableProperty, EasingKind, CameraZoom,
+  AnimatableProperty, EasingKind, CameraZoom, VideoEffect, VideoEffectKind, VignetteShape,
 } from '../types'
 import {
   KF_EPS, effVal as kfEffVal, editPose, addKeyframeAt, keyframeColor,
@@ -14,7 +15,7 @@ import {
   zoomHoldTime, zoomTargetPoseAt, editZoomPose, addZoomKeyframeAt, activeZoomKeyframeIndex,
 } from '../lib/camera'
 import { clamp01 } from '../lib/easing'
-import { srcIn, srcOut, sourceSpan, RATE_MIN, RATE_MAX } from '../lib/mediaTiming'
+import { srcIn, srcOut, sourceSpan, srcMin, srcMax, RATE_MIN, RATE_MAX } from '../lib/mediaTiming'
 import { rememberObjectStyle, rememberObjectData } from '../lib/objectDefaults'
 import {
   Field, NumberInput, TransitionFields, TypeOnBar, EffectFields,
@@ -24,6 +25,7 @@ import {
 type PropertiesPanelProps = {
   object: TimelineObject | null
   zoom?: CameraZoom | null
+  effect?: VideoEffect | null
   dispatch: React.Dispatch<ProjectAction>
   globalTime: number
   onSeek: (t: number) => void
@@ -32,10 +34,13 @@ type PropertiesPanelProps = {
   onToggleDraw?: () => void
 }
 
-export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTime, onSeek, isDrawing, onToggleDraw }: PropertiesPanelProps) {
-  // A selected zoom takes over the panel (mutually exclusive with object selection).
+export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, globalTime, onSeek, isDrawing, onToggleDraw }: PropertiesPanelProps) {
+  // A selected zoom or effect takes over the panel (all three selections are mutually exclusive).
   if (zoom) {
     return <ZoomEditor zoom={zoom} dispatch={dispatch} globalTime={globalTime} onSeek={onSeek} />
+  }
+  if (effect) {
+    return <EffectEditor effect={effect} dispatch={dispatch} globalTime={globalTime} onSeek={onSeek} />
   }
 
   if (!obj) {
@@ -168,12 +173,16 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
             const clamped = Math.max(RATE_MIN, Math.min(RATE_MAX, s))
             update({ duration: r2(span / clamped) })
           }
+          // In/Out are bounded by the clip's recoverable window [srcMin, srcMax] (= [0, originalDuration]
+          // for un-split clips; collapsed to the played span after a split so it reads as untrimmed).
+          const lo = srcMin(md)
+          const hi = srcMax(md)
           const setIn = (v: number) => {
-            const nin = Math.max(0, Math.min(v, outVal - 0.05))
+            const nin = Math.max(lo, Math.min(v, outVal - 0.05))
             update({ duration: r2((outVal - nin) / rate), data: { ...md, sourceIn: r2(nin), sourceOut: r2(outVal) } })
           }
           const setOut = (v: number) => {
-            const nout = Math.max(inVal + 0.05, Math.min(v, md.originalDuration))
+            const nout = Math.max(inVal + 0.05, Math.min(v, hi))
             update({ duration: r2((nout - inVal) / rate), data: { ...md, sourceIn: r2(inVal), sourceOut: r2(nout) } })
           }
           return (
@@ -194,10 +203,10 @@ export default function PropertiesPanel({ object: obj, zoom, dispatch, globalTim
               </Field>
               <div className="grid grid-cols-2 gap-2">
                 <Field label="In (s)">
-                  <NumberInput value={r2(inVal)} min={0} max={outVal} step={0.1} onChange={setIn} />
+                  <NumberInput value={r2(inVal)} min={lo} max={outVal} step={0.1} onChange={setIn} />
                 </Field>
                 <Field label="Out (s)">
-                  <NumberInput value={r2(outVal)} min={inVal} max={md.originalDuration} step={0.1} onChange={setOut} />
+                  <NumberInput value={r2(outVal)} min={inVal} max={hi} step={0.1} onChange={setOut} />
                 </Field>
               </div>
             </>
@@ -801,6 +810,193 @@ function ZoomEditor({
   )
 }
 
+// Human labels for the effect kinds (spec 23). Kind is fixed at creation — no switcher.
+const EFFECT_LABEL: Record<VideoEffectKind, string> = {
+  grayscale: 'Black & White',
+  sepia: 'Sepia',
+  invert: 'Invert',
+  vignette: 'Vignette',
+  grain: 'Film Grain',
+  oldfilm: 'Old Film',
+}
+
+const EFFECT_COLOR = '#d946ef' // fuchsia — distinct from the violet video bars + amber camera zoom
+
+/**
+ * Editor for a selected video effect (spec 23) — mirrors ZoomEditor. Shared controls (intensity +
+ * timing envelope + motion) plus a vignette-only Shape/Size/Feather block. Kind is fixed at creation.
+ */
+function EffectEditor({
+  effect, dispatch, globalTime, onSeek,
+}: {
+  effect: VideoEffect
+  dispatch: React.Dispatch<ProjectAction>
+  globalTime: number
+  onSeek: (t: number) => void
+}) {
+  const update = (updates: Partial<Omit<VideoEffect, 'id'>>) =>
+    dispatch({ type: 'UPDATE_EFFECT', effectId: effect.id, updates })
+  const updateTransient = (updates: Partial<Omit<VideoEffect, 'id'>>) =>
+    dispatch({ type: 'UPDATE_EFFECT_TRANSIENT', effectId: effect.id, updates })
+  const commit = () => dispatch({ type: 'COMMIT_TRANSIENT' })
+
+  const envelope = effect.transitionIn + effect.hold + effect.transitionOut
+  const end = effect.startTime + envelope
+  const withinSpan = globalTime >= effect.startTime && globalTime <= end
+  const vig = effect.vignette
+  const old = effect.oldfilm
+
+  // Update one vignette param (dispatched whole — UPDATE_EFFECT shallow-merges the top level only).
+  const updateVignette = (patch: Partial<NonNullable<VideoEffect['vignette']>>) => {
+    if (!vig) return
+    update({ vignette: { ...vig, ...patch } })
+  }
+
+  return (
+    <div className="w-64 bg-surface border-l border-border p-4 overflow-y-auto text-sm">
+      <div
+        className="mb-4 flex items-center gap-2 px-2 py-1.5 rounded text-white text-xs font-semibold"
+        style={{ background: EFFECT_COLOR }}
+      >
+        <IconSparkles size={15} stroke={2} />
+        <span>{EFFECT_LABEL[effect.kind]}</span>
+      </div>
+      <p className="text-[10px] text-subtle mb-4 -mt-2">
+        A render-wide effect. Drag its bar on the timeline to move or lengthen it; it fades in / out
+        over the ease in / out. Applies in both Frame and Live view.
+      </p>
+
+      {/* Intensity — peak strength; fades in/out via the envelope */}
+      <Accordion title="Style" defaultOpen>
+        <Field label="Intensity">
+          <div className="flex items-center gap-2 w-full">
+            <input
+              type="range"
+              min={0} max={100} step={1}
+              value={Math.round(effect.intensity * 100)}
+              onChange={(e) => updateTransient({ intensity: Number(e.target.value) / 100 })}
+              onPointerUp={commit}
+              onKeyUp={commit}
+              className="w-full"
+            />
+            <span className="text-[10px] text-subtle tabular-nums w-8 text-right">
+              {Math.round(effect.intensity * 100)}%
+            </span>
+          </div>
+        </Field>
+      </Accordion>
+
+      {/* Vignette-only shape controls */}
+      {effect.kind === 'vignette' && vig && (
+        <Accordion title="Vignette" defaultOpen>
+          <Field label="Shape">
+            <select
+              value={vig.shape}
+              onChange={(e) => updateVignette({ shape: e.target.value as VignetteShape })}
+              className={SELECT_CLS}
+            >
+              <option value="rectangle">Rectangle (screen)</option>
+              <option value="circle">Circle</option>
+            </select>
+          </Field>
+          <Field label="Size">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range"
+                min={0} max={100} step={1}
+                value={Math.round(vig.size * 100)}
+                onChange={(e) => updateTransient({ vignette: { ...vig, size: Number(e.target.value) / 100 } })}
+                onPointerUp={commit}
+                onKeyUp={commit}
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{Math.round(vig.size * 100)}%</span>
+            </div>
+          </Field>
+          <Field label="Feather">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range"
+                min={0} max={100} step={1}
+                value={Math.round(vig.feather * 100)}
+                onChange={(e) => updateTransient({ vignette: { ...vig, feather: Number(e.target.value) / 100 } })}
+                onPointerUp={commit}
+                onKeyUp={commit}
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{Math.round(vig.feather * 100)}%</span>
+            </div>
+          </Field>
+        </Accordion>
+      )}
+
+      {/* Old-film-only wobble (gate weave) — decoupled from intensity, defaults to 0 */}
+      {effect.kind === 'oldfilm' && old && (
+        <Accordion title="Old Film" defaultOpen>
+          <Field label="Wobble">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range"
+                min={0} max={100} step={1}
+                value={Math.round(old.wobble * 100)}
+                onChange={(e) => updateTransient({ oldfilm: { ...old, wobble: Number(e.target.value) / 100 } })}
+                onPointerUp={commit}
+                onKeyUp={commit}
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{Math.round(old.wobble * 100)}%</span>
+            </div>
+          </Field>
+          <p className="text-[10px] text-subtle">Frame jitter / gate weave — independent of Intensity (which drives scratches, dust &amp; flicker).</p>
+        </Accordion>
+      )}
+
+      {/* Timing envelope — identical shape to the zoom's */}
+      <Accordion title="Timing">
+        <Field label="Start (s)">
+          <NumberInput value={effect.startTime} min={0} step={0.1} onChange={(v) => update({ startTime: Math.max(0, v) })} />
+        </Field>
+        <Field label="Ease in (s)">
+          <NumberInput value={effect.transitionIn} min={0} step={0.1} onChange={(v) => update({ transitionIn: Math.max(0, v) })} />
+        </Field>
+        <Field label="Hold (s)">
+          <NumberInput value={effect.hold} min={0} step={0.1} onChange={(v) => update({ hold: Math.max(0, v) })} />
+        </Field>
+        <Field label="Ease out (s)">
+          <NumberInput value={effect.transitionOut} min={0} step={0.1} onChange={(v) => update({ transitionOut: Math.max(0, v) })} />
+        </Field>
+        <div>
+          <label className="text-muted text-xs block mb-1">Motion</label>
+          <MotionPicker value={effect.easing} onChange={(k) => update({ easing: k })} />
+          <p className="text-[10px] text-subtle mt-1">Shapes both the fade-in and fade-out ramps.</p>
+        </div>
+        <div className="flex items-center justify-between text-[10px] text-subtle tabular-nums pt-1">
+          <span>Span: {effect.startTime.toFixed(1)}s → {end.toFixed(1)}s</span>
+          <span>({envelope.toFixed(1)}s)</span>
+        </div>
+        <button
+          onClick={() => onSeek(effect.startTime)}
+          className={`w-full px-2 py-1 text-[11px] rounded cursor-pointer transition-colors ${
+            withinSpan ? 'bg-surface-muted text-muted hover:bg-surface-hover' : 'bg-accent-soft text-accent hover:bg-accent/20'
+          }`}
+          title="Move the playhead to this effect's start"
+        >
+          {withinSpan ? 'Playhead is on this effect' : 'Jump to effect start'}
+        </button>
+      </Accordion>
+
+      <div className="mt-4">
+        <button
+          onClick={() => dispatch({ type: 'REMOVE_EFFECT', effectId: effect.id })}
+          className="w-full px-3 py-1.5 text-xs bg-danger-soft hover:bg-danger/20 text-danger rounded transition-colors cursor-pointer"
+        >
+          Delete effect
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // --- Inspector section (spec 17 P3) ---
 // Distinct, iconed, collapsible cards — the fix for the "sections aren't distinct" complaint. This
 // is inspector-only chrome; the toolbar popovers keep the plain `Section` from propertyControls.
@@ -816,6 +1012,9 @@ const SECTION_ICONS: Record<string, React.ReactNode> = {
   Text: <IconTypography size={15} stroke={2} />,
   Arrow: <IconArrowUpRight size={15} stroke={2} />,
   Focus: <IconFocusCentered size={15} stroke={2} />,
+  Effects: <IconSparkles size={15} stroke={2} />,
+  Vignette: <IconSparkles size={15} stroke={2} />,
+  'Old Film': <IconSparkles size={15} stroke={2} />,
 }
 
 function Accordion({ title, children, defaultOpen = false }: { title: string; children: React.ReactNode; defaultOpen?: boolean }) {

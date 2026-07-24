@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import type { InteractionMode, TimelineObjectType, TimelineObject, ArrowData, FreehandData } from '../types'
-import { createTimelineObject, createCameraZoom, createMarker } from '../types'
+import type { InteractionMode, TimelineObjectType, TimelineObject, ArrowData, FreehandData, VideoEffectKind } from '../types'
+import { createTimelineObject, createCameraZoom, createVideoEffect, createMarker } from '../types'
 import { getRememberedStyle, getRememberedData } from '../lib/objectDefaults'
 import { useProject } from '../hooks/useProject'
 import { usePlayback } from '../hooks/usePlayback'
@@ -18,9 +18,10 @@ import PropertiesPanel from './PropertiesPanel'
 import ImportModal from './ImportModal'
 import ExportModal from './ExportModal'
 import AppearanceControls from './AppearanceControls'
+import HotkeysModal from './HotkeysModal'
 import {
   IconDeviceFloppy, IconFolderOpen, IconArrowBackUp, IconArrowForwardUp,
-  IconDownload, IconChevronUp,
+  IconDownload, IconChevronUp, IconKeyboard,
 } from '@tabler/icons-react'
 
 // Timeline resize/collapse (spec 16 B). Ephemeral view state — not persisted, not part of undo.
@@ -61,13 +62,21 @@ export default function App() {
   // Per-object drawing state (spec 17 M): non-null = actively drawing/editing that arrow/freehand's
   // points. Replaces the old global Move/Draw toggle; interactionMode is DERIVED from it below.
   const [drawingObjectId, setDrawingObjectId] = useState<string | null>(null)
-  const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null)
+  // Multi-select: `selectedObjectIds` is the source of truth — a set of selected object ids that may
+  // span lanes (shift-click to add/remove). `selectedObjectId` is the single "primary" selection that
+  // drives the properties panel + canvas overlay; it's non-null only when EXACTLY one object is
+  // selected, so a multi-selection intentionally shows no panel and no canvas box (it's a timeline
+  // bulk-move tool). Zoom/effect selection stay mutually exclusive with any object selection.
+  const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>([])
+  const selectedObjectId = selectedObjectIds.length === 1 ? selectedObjectIds[0] : null
   const [selectedZoomId, setSelectedZoomId] = useState<string | null>(null)
+  const [selectedEffectId, setSelectedEffectId] = useState<string | null>(null)
   // Camera view (spec 13): 'frame' = author un-zoomed with a framing rectangle; 'live' = apply the
   // real transform (WYSIWYG, matches export). Pure view state — not persisted, not part of undo.
   const [cameraView, setCameraView] = useState<'frame' | 'live'>('frame')
   const [showImport, setShowImport] = useState(false)
   const [showExport, setShowExport] = useState(false)
+  const [showHotkeys, setShowHotkeys] = useState(false)
   const projectFileRef = useRef<HTMLInputElement>(null)
 
   // Timeline resize/collapse (spec 16 B). Both are ephemeral view state (like cameraView).
@@ -102,6 +111,7 @@ export default function App() {
 
   const selectedObject = project.objects.find((o) => o.id === selectedObjectId) ?? null
   const selectedZoom = project.zooms?.find((z) => z.id === selectedZoomId) ?? null
+  const selectedEffect = project.effects?.find((e) => e.id === selectedEffectId) ?? null
 
   // Draw mode only enabled when an arrow or freehand object is selected
   const drawEnabled = selectedObject != null && (selectedObject.type === 'arrow' || selectedObject.type === 'freehand')
@@ -237,8 +247,9 @@ export default function App() {
     dispatch({ type: 'ADD_OBJECTS', objects: withLanes })
     const last = withLanes[withLanes.length - 1]
     if (last) {
-      setSelectedObjectId(last.id)
-      setSelectedZoomId(null) // object/zoom selection are mutually exclusive
+      setSelectedObjectIds([last.id])
+      setSelectedZoomId(null) // object/zoom/effect selection are mutually exclusive
+      setSelectedEffectId(null)
     }
     // Adding/importing anything drops back to Frame view so the new object is visible + editable
     // (Live view hides the whole scene outside the zoom and disables editing).
@@ -319,8 +330,9 @@ export default function App() {
   const handleCreateZoom = useCallback(() => {
     const zoom = createCameraZoom({ startTime: playback.globalTime })
     dispatch({ type: 'ADD_ZOOM', zoom })
-    setSelectedObjectId(null)
+    setSelectedObjectIds([])
     setSelectedZoomId(zoom.id)
+    setSelectedEffectId(null)
     setDrawingObjectId(null)
     setCameraView('frame') // author the new zoom un-zoomed with its framing rectangle (R8/R15)
   }, [playback.globalTime, dispatch])
@@ -328,7 +340,28 @@ export default function App() {
   const handleSelectZoom = useCallback((id: string | null) => {
     setSelectedZoomId(id)
     if (id) {
-      setSelectedObjectId(null) // object/zoom selection are mutually exclusive
+      setSelectedObjectIds([]) // object/zoom/effect selection are mutually exclusive
+      setSelectedEffectId(null)
+      setDrawingObjectId(null)
+    }
+  }, [])
+
+  // Create a video effect (spec 23) at the playhead: mirrors handleCreateZoom. Select it (clearing
+  // object + zoom selection) so its editor is immediately shown in the panel.
+  const handleCreateEffect = useCallback((kind: VideoEffectKind) => {
+    const effect = createVideoEffect(kind, { startTime: playback.globalTime })
+    dispatch({ type: 'ADD_EFFECT', effect })
+    setSelectedObjectIds([])
+    setSelectedZoomId(null)
+    setSelectedEffectId(effect.id)
+    setDrawingObjectId(null)
+  }, [playback.globalTime, dispatch])
+
+  const handleSelectEffect = useCallback((id: string | null) => {
+    setSelectedEffectId(id)
+    if (id) {
+      setSelectedObjectIds([]) // object/zoom/effect selection are mutually exclusive
+      setSelectedZoomId(null)
       setDrawingObjectId(null)
     }
   }, [])
@@ -425,12 +458,16 @@ export default function App() {
           handleFinishArrow()
         } else {
           setDrawingObjectId(null)
-          setSelectedObjectId(null)
+          setSelectedObjectIds([])
           setSelectedZoomId(null)
+          setSelectedEffectId(null)
         }
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedZoom) {
         dispatch({ type: 'REMOVE_ZOOM', zoomId: selectedZoom.id })
         setSelectedZoomId(null)
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedEffect) {
+        dispatch({ type: 'REMOVE_EFFECT', effectId: selectedEffect.id })
+        setSelectedEffectId(null)
       } else if (e.key === 'Backspace' && interactionMode === 'draw' && selectedObject?.type === 'arrow') {
         // Remove last arrow point
         e.preventDefault()
@@ -442,9 +479,10 @@ export default function App() {
             updates: { data: { ...data, points: data.points.slice(0, -1) } },
           })
         }
-      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedObject) {
-        dispatch({ type: 'REMOVE_OBJECT', objectId: selectedObject.id })
-        setSelectedObjectId(null)
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedObjectIds.length > 0) {
+        // Deletes the whole selection — one object or a shift-selected group across lanes.
+        for (const id of selectedObjectIds) dispatch({ type: 'REMOVE_OBJECT', objectId: id })
+        setSelectedObjectIds([])
       } else if (e.ctrlKey && e.key === 'z') {
         e.preventDefault()
         undo()
@@ -456,11 +494,18 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [playback, interactionMode, selectedObject, selectedZoom, drawEnabled, dispatch, undo, redo, handleFinishArrow, toggleCameraView, handleAddMarker, handleStepMarker])
+  }, [playback, interactionMode, selectedObject, selectedObjectIds, selectedZoom, selectedEffect, drawEnabled, dispatch, undo, redo, handleFinishArrow, toggleCameraView, handleAddMarker, handleStepMarker])
 
-  const handleSelectObject = useCallback((id: string | null) => {
-    setSelectedObjectId(id)
-    if (id) setSelectedZoomId(null) // object/zoom selection are mutually exclusive
+  // `additive` (shift-click from the timeline) toggles the id in/out of the multi-selection instead
+  // of replacing it — letting the user gather clips across lanes to move them in time together.
+  const handleSelectObject = useCallback((id: string | null, additive = false) => {
+    if (id && additive) {
+      setSelectedZoomId(null); setSelectedEffectId(null); setDrawingObjectId(null)
+      setSelectedObjectIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]))
+      return
+    }
+    setSelectedObjectIds(id ? [id] : [])
+    if (id) { setSelectedZoomId(null); setSelectedEffectId(null) } // object/zoom/effect selection are mutually exclusive
     // Selecting no longer auto-enters draw (spec 17 M) — selection means "move". Re-edit an
     // arrow/freehand's points via the panel's "Edit points". Selecting away finishes any drawing.
     setDrawingObjectId(null)
@@ -528,6 +573,14 @@ export default function App() {
             theme={uiPrefs.theme}
             onToggleTheme={uiPrefs.toggleTheme}
           />
+          <button
+            onClick={() => setShowHotkeys(true)}
+            title="Keyboard shortcuts"
+            aria-label="Keyboard shortcuts"
+            className="flex items-center justify-center w-7 h-7 rounded text-muted hover:text-fg hover:bg-surface-hover cursor-pointer transition-colors"
+          >
+            <IconKeyboard size={16} stroke={2} />
+          </button>
           <span className="w-px h-6 bg-border" />
           <button
             onClick={() => setShowExport(true)}
@@ -546,6 +599,7 @@ export default function App() {
           onAddAsset={handleAddExistingAsset}
           onCreateObject={handleCreateObject}
           onCreateZoom={handleCreateZoom}
+          onCreateEffect={handleCreateEffect}
         />
         <div className="relative flex flex-1 min-w-0">
         <Canvas
@@ -563,6 +617,7 @@ export default function App() {
           onSelectZoom={handleSelectZoom}
           cameraView={cameraView}
           onToggleCameraView={toggleCameraView}
+          effects={project.effects}
           onToggleDraw={handleToggleDrawSelected}
         />
           {/* Floating transport pill (spec 17 C) — centered over the canvas, in the render's bottom
@@ -590,6 +645,7 @@ export default function App() {
         <PropertiesPanel
           object={selectedObject}
           zoom={selectedZoom}
+          effect={selectedEffect}
           dispatch={dispatch}
           globalTime={playback.globalTime}
           onSeek={playback.seek}
@@ -623,13 +679,16 @@ export default function App() {
               objects={project.objects}
               globalTime={playback.globalTime}
               totalDuration={playback.totalDuration}
-              selectedObjectId={selectedObjectId}
+              selectedObjectIds={selectedObjectIds}
               onSelectObject={handleSelectObject}
               onSeek={playback.seek}
               dispatch={dispatch}
               zooms={project.zooms}
               selectedZoomId={selectedZoomId}
               onSelectZoom={handleSelectZoom}
+              effects={project.effects}
+              selectedEffectId={selectedEffectId}
+              onSelectEffect={handleSelectEffect}
               markers={project.markers}
               onCollapse={() => setTimelineCollapsed(true)}
             />
@@ -647,6 +706,7 @@ export default function App() {
         />
       )}
       {showExport && <ExportModal project={project} onClose={() => setShowExport(false)} />}
+      {showHotkeys && <HotkeysModal onClose={() => setShowHotkeys(false)} />}
     </div>
   )
 }

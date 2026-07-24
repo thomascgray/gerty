@@ -51,10 +51,15 @@ function splitObject(obj: TimelineObject, globalTime: number): [TimelineObject, 
     rightKfs.unshift({ time: 0, pose: { ...atPose }, easing: boundaryEasing })
   }
 
+  // Each half collapses its recoverable-source window (sourceMin/sourceMax) to its own played span,
+  // so in the UI it reads as a fresh, UNtrimmed clip: no trim ghosts, no edge you can drag back out
+  // to reveal the sibling's footage. (Decode is unaffected — sourceIn/sourceOut still map to the
+  // true asset offsets.) Without this, the left half's ghost would extend right over the right half
+  // and steal its clicks (and vice-versa).
   const left: TimelineObject = {
     ...obj,
     duration: splitOffset,
-    data: { ...structuredClone(data), sourceIn: inPt, sourceOut: sourceSplit },
+    data: { ...structuredClone(data), sourceIn: inPt, sourceOut: sourceSplit, sourceMin: inPt, sourceMax: sourceSplit },
     keyframes: leftKfs.length ? leftKfs : undefined,
   }
   const right: TimelineObject = {
@@ -63,7 +68,7 @@ function splitObject(obj: TimelineObject, globalTime: number): [TimelineObject, 
     name: `${obj.name} (2)`,
     startTime: obj.startTime + splitOffset,
     duration: obj.duration - splitOffset,
-    data: { ...structuredClone(data), sourceIn: sourceSplit, sourceOut: outPt },
+    data: { ...structuredClone(data), sourceIn: sourceSplit, sourceOut: outPt, sourceMin: sourceSplit, sourceMax: outPt },
     keyframes: rightKfs.length ? rightKfs : undefined,
   }
   return [left, right]
@@ -128,6 +133,21 @@ function projectReducer(state: UndoableState, action: ProjectAction): UndoableSt
     const newProject = applyAction(state.present, {
       type: 'UPDATE_ZOOM',
       zoomId: action.zoomId,
+      updates: action.updates,
+    })
+    if (newProject === state.present) return state
+    return {
+      ...state,
+      present: newProject,
+      transientSnapshot: state.transientSnapshot ?? state.present,
+      dirty: true,
+    }
+  }
+
+  if (action.type === 'UPDATE_EFFECT_TRANSIENT') {
+    const newProject = applyAction(state.present, {
+      type: 'UPDATE_EFFECT',
+      effectId: action.effectId,
       updates: action.updates,
     })
     if (newProject === state.present) return state
@@ -213,6 +233,20 @@ function applyAction(project: Project, action: ProjectAction): Project {
 
     case 'REMOVE_ZOOM':
       return { ...project, zooms: (project.zooms ?? []).filter((z) => z.id !== action.zoomId) }
+
+    case 'ADD_EFFECT':
+      return { ...project, effects: [...(project.effects ?? []), action.effect] }
+
+    case 'UPDATE_EFFECT':
+      return {
+        ...project,
+        effects: (project.effects ?? []).map((e) =>
+          e.id === action.effectId ? { ...e, ...action.updates } : e,
+        ),
+      }
+
+    case 'REMOVE_EFFECT':
+      return { ...project, effects: (project.effects ?? []).filter((e) => e.id !== action.effectId) }
 
     case 'ADD_MARKER':
       return { ...project, markers: [...(project.markers ?? []), action.marker] }

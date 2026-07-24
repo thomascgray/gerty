@@ -1,7 +1,8 @@
 import { useRef, useEffect, useLayoutEffect, useState, useCallback, useMemo } from 'react'
-import type { TimelineObject, InteractionMode, ProjectAction, ArrowData, FreehandData, CameraZoom, TextData } from '../types'
+import type { TimelineObject, InteractionMode, ProjectAction, ArrowData, FreehandData, CameraZoom, TextData, VideoEffect } from '../types'
 import { useCanvasRenderer } from '../hooks/useCanvasRenderer'
 import type { EditorOptions } from '../lib/renderer'
+import { resolveEffects } from '../lib/effects'
 import { segmentControlPoint, fitText } from '../lib/annotations'
 import { resolvePose, editPose, activeKeyframeIndex, keyframeColor } from '../lib/keyframes'
 import {
@@ -105,6 +106,8 @@ type CanvasProps = {
   onSelectZoom: (id: string | null) => void
   cameraView: 'frame' | 'live'
   onToggleCameraView: () => void
+  // Video effects (spec 23) — colour/overlay post-process; applied in BOTH Frame and Live view.
+  effects?: VideoEffect[]
   // Floating context toolbar (spec 17 P): "Edit points" for arrow/freehand routes through this.
   onToggleDraw?: () => void
 }
@@ -467,6 +470,7 @@ export default function Canvas({
   onSelectZoom,
   cameraView,
   onToggleCameraView,
+  effects,
   onToggleDraw,
 }: CanvasProps) {
   const renderCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -562,11 +566,18 @@ export default function Canvas({
   )
 
   const activeDrawingObjectId = dragState?.kind === 'draw-freehand' ? dragState.objectId : null
+  // Video effects (spec 23): resolved in BOTH views (unlike the camera) — they don't move geometry,
+  // so they can't block object editing, and you want to see the colour/vignette look while authoring.
+  const resolvedEffects = useMemo(
+    () => resolveEffects(effects, globalTime),
+    [effects, globalTime],
+  )
   const editorOpts = useMemo<EditorOptions>(() => ({
     editorMode: !isLive, // Live view = WYSIWYG, no editor ghosts
     activeDrawingObjectId,
     camera: liveCamera,
-  }), [isLive, activeDrawingObjectId, liveCamera])
+    effects: resolvedEffects,
+  }), [isLive, activeDrawingObjectId, liveCamera, resolvedEffects])
   // Hide the text object being edited so only the textarea shows it (spec 18-qol R6 — no double image).
   const renderObjects = useMemo(
     () => (editingTextId ? objects.filter((o) => o.id !== editingTextId) : objects),

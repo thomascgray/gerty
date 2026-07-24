@@ -35,6 +35,17 @@ export function sourceSpan(d: MediaData): number {
   return srcOut(d) - srcIn(d)
 }
 
+/** Floor of the recoverable-source window: sourceIn can't be trimmed below this. Default 0 (asset
+ *  start). A split collapses the window to the played span so the halves show no trim ghosts. */
+export function srcMin(d: MediaData): number {
+  return d.sourceMin ?? 0
+}
+
+/** Ceil of the recoverable-source window: sourceOut can't be trimmed past this. Default = full asset. */
+export function srcMax(d: MediaData): number {
+  return d.sourceMax ?? d.originalDuration
+}
+
 /** Effective audio gain for a clip: its own volume, or 0 when the clip is muted. Read by both
  *  preview (useAudioPlayback) and every export mixdown, so mute is honored consistently. */
 export function effectiveVolume(d: MediaData): number {

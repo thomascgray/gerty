@@ -1,24 +1,31 @@
 import { useRef, useCallback, useState, useEffect } from 'react'
 import { createPortal } from 'react-dom'
-import type { TimelineObject, ProjectAction, AudioData, VideoData, CameraZoom, Marker } from '../types'
+import type { TimelineObject, ProjectAction, AudioData, VideoData, CameraZoom, VideoEffect, Marker } from '../types'
 import { keyframeColor } from '../lib/keyframes'
 import { zoomEnvelope } from '../lib/camera'
-import { sourceSpan, srcIn, srcOut } from '../lib/mediaTiming'
+import { effectEnvelope } from '../lib/effects'
+import { sourceSpan, srcIn, srcOut, srcMin, srcMax } from '../lib/mediaTiming'
 import { snapTime, snapClipMove, SNAP_THRESHOLD_PX } from '../lib/snapping'
-import { IconChevronDown, IconPlus, IconX, IconViewfinder, IconEye, IconEyeOff, IconTrash } from '@tabler/icons-react'
+import { IconChevronDown, IconPlus, IconX, IconViewfinder, IconSparkles, IconEye, IconEyeOff, IconTrash } from '@tabler/icons-react'
 
 type TimelineProps = {
   objects: TimelineObject[]
   globalTime: number
   totalDuration: number
-  selectedObjectId: string | null
-  onSelectObject: (id: string | null) => void
+  // Full multi-selection set (spans lanes); every member is highlighted and moves together.
+  selectedObjectIds: string[]
+  // `additive` (shift-click) toggles the id in the multi-selection instead of replacing it.
+  onSelectObject: (id: string | null, additive?: boolean) => void
   onSeek: (time: number) => void
   dispatch: React.Dispatch<ProjectAction>
   // Camera zooms (spec 13)
   zooms?: CameraZoom[]
   selectedZoomId: string | null
   onSelectZoom: (id: string | null) => void
+  // Video effects (spec 23) — own pinned track, mirrors the Camera track affordances.
+  effects?: VideoEffect[]
+  selectedEffectId: string | null
+  onSelectEffect: (id: string | null) => void
   // Timeline markers (spec 22). Retime/edit/delete are dispatched directly (like zooms).
   markers?: Marker[]
   // Collapse the timeline to a slim bar (spec 16 B3). App owns the collapsed state + height.
@@ -29,6 +36,7 @@ const LANE_HEIGHT = 40
 const LANE_GAP = 2
 const RULER_HEIGHT = 24
 const CAMERA_TRACK_HEIGHT = 32
+const EFFECT_ROW_HEIGHT = 26 // one stacked row of effect bars; the track grows to fit N rows
 const GUTTER_WIDTH = 32
 const MIN_PIXELS_PER_SECOND = 2
 const MAX_PIXELS_PER_SECOND = 400
@@ -38,10 +46,42 @@ const DEFAULT_PIXELS_PER_SECOND = 80
 const ZOOM_WHEEL_SENSITIVITY = 0.0012
 const TIMELINE_PADDING_SECONDS = 5
 const ZOOM_COLOR = '#f59e0b' // amber — matches the canvas framing rect + zoom panel
+const EFFECT_COLOR = '#d946ef' // fuchsia — matches the effect panel header; distinct from violet video bars
 const MARKER_COLOR = '#06b6d4' // cyan — distinct from amber zooms, the type colors, and the playhead
 const SNAP_LINE_COLOR = '#ffffff' // the bright guide shown while a drag is actively snapped
 // Swatches offered in the marker edit popover (spec 22 R17).
 const MARKER_SWATCHES = ['#06b6d4', '#ef4444', '#22c55e', '#f59e0b', '#a855f7', '#ec4899']
+
+// Short labels shown on the effect timeline bars (spec 23).
+const EFFECT_BAR_LABEL: Record<VideoEffect['kind'], string> = {
+  grayscale: 'B&W',
+  sepia: 'Sepia',
+  invert: 'Invert',
+  vignette: 'Vignette',
+  grain: 'Grain',
+  oldfilm: 'Old Film',
+}
+
+/**
+ * Assign each effect a display ROW so overlapping effects (e.g. a Sepia + a Vignette at the same
+ * time) stack on separate lines in the Effects track instead of hiding each other (spec 23). Greedy
+ * interval layout: each effect takes the first row free at its start. Display-only — the renderer
+ * still stacks all active effects regardless of row.
+ */
+function layoutEffectRows(effects: VideoEffect[]): { rows: Map<string, number>; count: number } {
+  const sorted = [...effects].sort((a, b) => a.startTime - b.startTime)
+  const rowEnds: number[] = [] // end time of the last bar placed in each row
+  const rows = new Map<string, number>()
+  for (const e of sorted) {
+    const start = e.startTime
+    const end = e.startTime + effectEnvelope(e)
+    let r = rowEnds.findIndex((endT) => endT <= start + 1e-6)
+    if (r === -1) { r = rowEnds.length; rowEnds.push(end) }
+    else rowEnds[r] = end
+    rows.set(e.id, r)
+  }
+  return { rows, count: Math.max(1, rowEnds.length) }
+}
 
 const formatTime = (seconds: number): string => {
   const m = Math.floor(seconds / 60)
@@ -62,14 +102,18 @@ const TYPE_COLORS: Record<string, string> = {
 
 type DragState =
   | null
-  | { kind: 'move'; objectId: string; startMouseX: number; startMouseY: number; originalStartTime: number; originalLane: number; clampMinLane: number; clampMaxLane: number }
+  // Move drags one clip OR a whole multi-selection together. `objectId` is the grabbed (primary)
+  // clip that drives snapping; `group` holds every moving clip's original start/lane. Time + lane
+  // deltas are computed once from the primary and applied to all, clamped so no member goes out of
+  // bounds (dt floored so the earliest can't cross 0; laneDelta bounded by the group's lane extent).
+  | { kind: 'move'; objectId: string; startMouseX: number; startMouseY: number; originalStartTime: number; group: { objectId: string; originalStartTime: number; originalLane: number }[]; minGroupStart: number; clampMinLaneDelta: number; clampMaxLaneDelta: number }
   | { kind: 'resize-left'; objectId: string; startMouseX: number; originalStartTime: number; originalDuration: number }
   | { kind: 'resize-right'; objectId: string; startMouseX: number; originalDuration: number }
   // Trim (spec 14 R8): rate-constant edge-drag on audio/video. Adjusts the source span + duration
   // (and startTime on the left edge, keeping the right timeline edge fixed) so playback speed is
   // preserved — the bottom half of the split edge handle.
-  | { kind: 'trim-left'; objectId: string; startMouseX: number; originalStartTime: number; originalDuration: number; originalSourceIn: number; originalSourceOut: number; assetDuration: number }
-  | { kind: 'trim-right'; objectId: string; startMouseX: number; originalDuration: number; originalSourceIn: number; originalSourceOut: number; assetDuration: number }
+  | { kind: 'trim-left'; objectId: string; startMouseX: number; originalStartTime: number; originalDuration: number; originalSourceIn: number; originalSourceOut: number; sourceMin: number }
+  | { kind: 'trim-right'; objectId: string; startMouseX: number; originalDuration: number; originalSourceIn: number; originalSourceOut: number; sourceMax: number }
   | { kind: 'move-keyframe'; objectId: string; kfIndex: number; startMouseX: number; originalTime: number; minTime: number; maxTime: number }
   | { kind: 'playhead'; startMouseX: number; startTime: number }
   // Camera-zoom bars on the pinned Camera track (spec 13). Move shifts startTime; resizing
@@ -79,6 +123,10 @@ type DragState =
   | { kind: 'zoom-resize-left'; zoomId: string; startMouseX: number; originalStartTime: number; originalHold: number }
   // Retime a single pan/scale keyframe within a zoom's hold (clamped between neighbors, [0, hold]).
   | { kind: 'zoom-move-keyframe'; zoomId: string; kfIndex: number; startMouseX: number; originalTime: number; minTime: number; maxTime: number }
+  // Effect bars on the pinned Effects track (spec 23) — mirror the zoom bar drags.
+  | { kind: 'effect-move'; effectId: string; startMouseX: number; originalStartTime: number }
+  | { kind: 'effect-resize-right'; effectId: string; startMouseX: number; originalHold: number }
+  | { kind: 'effect-resize-left'; effectId: string; startMouseX: number; originalStartTime: number; originalHold: number }
   // Drag a marker flag along the ruler to retime it (spec 22). A no-movement press is treated as a
   // click on mouse-up (seek + open the edit popover); a real drag retimes with snapping.
   | { kind: 'marker-move'; markerId: string; startMouseX: number; startClientY: number; originalTime: number }
@@ -92,13 +140,16 @@ export default function Timeline({
   objects,
   globalTime,
   totalDuration,
-  selectedObjectId,
+  selectedObjectIds,
   onSelectObject,
   onSeek,
   dispatch,
   zooms,
   selectedZoomId,
   onSelectZoom,
+  effects,
+  selectedEffectId,
+  onSelectEffect,
   markers,
   onCollapse,
 }: TimelineProps) {
@@ -157,14 +208,14 @@ export default function Timeline({
   // every visible clip's start/end edge. Excludes the dragged item's own edges/time (so it never
   // sticks to itself) and hidden clips (you can't see them to align to).
   const buildSnapCandidates = useCallback(
-    (opts: { excludeObjectId?: string; excludeMarkerId?: string; includePlayhead?: boolean }) => {
+    (opts: { excludeObjectId?: string; excludeObjectIds?: Set<string>; excludeMarkerId?: string; includePlayhead?: boolean }) => {
       const cands: number[] = [0]
       if (opts.includePlayhead !== false) cands.push(globalTime)
       for (const m of markers ?? []) {
         if (m.id !== opts.excludeMarkerId) cands.push(m.time)
       }
       for (const o of objects) {
-        if (o.id === opts.excludeObjectId || o.hidden) continue
+        if (o.id === opts.excludeObjectId || opts.excludeObjectIds?.has(o.id) || o.hidden) continue
         cands.push(o.startTime, o.startTime + o.duration)
       }
       return cands
@@ -251,19 +302,29 @@ export default function Timeline({
       } else if (dragState.kind === 'move') {
         const rawStart = Math.max(0, dragState.originalStartTime + dt)
         const obj = objects.find((o) => o.id === dragState.objectId)
-        const snap = snapClipMove(rawStart, obj?.duration ?? 0, buildSnapCandidates({ excludeObjectId: dragState.objectId }), pixelsPerSecond, SNAP_THRESHOLD_PX, alt)
+        // Snapping is driven by the grabbed (primary) clip only; exclude the whole moving group so
+        // members don't snap to each other.
+        const groupIds = new Set(dragState.group.map((g) => g.objectId))
+        const snap = snapClipMove(rawStart, obj?.duration ?? 0, buildSnapCandidates({ excludeObjectIds: groupIds }), pixelsPerSecond, SNAP_THRESHOLD_PX, alt)
         setSnapLineTime(snap.snappedTo)
         // Snapped → land exactly on the target; otherwise keep the gentle 0.1s quantize.
-        const newStart = snap.snappedTo !== null ? snap.time : Math.round(rawStart * 10) / 10
-        // Calculate target lane, clamped to existing lanes
+        const primaryStart = snap.snappedTo !== null ? snap.time : Math.round(rawStart * 10) / 10
+        // The shared time delta the group moves by, derived from the primary and floored so the
+        // earliest member can't slide past 0 (preserving relative spacing).
+        let dtApplied = primaryStart - dragState.originalStartTime
+        if (dragState.minGroupStart + dtApplied < 0) dtApplied = -dragState.minGroupStart
+        // Shared lane delta, clamped to the group's collective lane extent.
         const dy = e.clientY - dragState.startMouseY
-        const laneDelta = Math.round(-dy / (LANE_HEIGHT + LANE_GAP))
-        const targetLane = Math.max(dragState.clampMinLane, Math.min(dragState.clampMaxLane, dragState.originalLane + laneDelta))
-        dispatch({
-          type: 'UPDATE_OBJECT_TRANSIENT',
-          objectId: dragState.objectId,
-          updates: { startTime: newStart, lane: targetLane },
-        })
+        const rawLaneDelta = Math.round(-dy / (LANE_HEIGHT + LANE_GAP))
+        const laneDelta = Math.max(dragState.clampMinLaneDelta, Math.min(dragState.clampMaxLaneDelta, rawLaneDelta))
+        // One transient dispatch per member — they collapse into a single undo entry on commit.
+        for (const g of dragState.group) {
+          dispatch({
+            type: 'UPDATE_OBJECT_TRANSIENT',
+            objectId: g.objectId,
+            updates: { startTime: Math.round((g.originalStartTime + dtApplied) * 100) / 100, lane: g.originalLane + laneDelta },
+          })
+        }
       } else if (dragState.kind === 'resize-left') {
         const origEnd = dragState.originalStartTime + dragState.originalDuration
         // Only non-media objects reach resize-left now (media edges trim instead), so no rate clamp.
@@ -306,8 +367,9 @@ export default function Timeline({
         const origSpan = dragState.originalSourceOut - dragState.originalSourceIn
         const rate = origSpan / dragState.originalDuration
         const rightEdge = dragState.originalStartTime + dragState.originalDuration
-        // duration ≤ originalSourceOut/rate keeps sourceIn ≥ 0; duration ≤ rightEdge keeps startTime ≥ 0.
-        const maxDur = Math.min(dragState.originalSourceOut / rate, rightEdge)
+        // duration ≤ (originalSourceOut-sourceMin)/rate keeps sourceIn ≥ sourceMin (window floor);
+        // duration ≤ rightEdge keeps startTime ≥ 0.
+        const maxDur = Math.min((dragState.originalSourceOut - dragState.sourceMin) / rate, rightEdge)
         // Snap the moving LEFT edge to nearby targets ("trim to the beat", spec 22 R13).
         const rawStart = dragState.originalStartTime + dt
         const snap = snapTime(rawStart, buildSnapCandidates({ excludeObjectId: dragState.objectId }), pixelsPerSecond, SNAP_THRESHOLD_PX, alt)
@@ -316,7 +378,7 @@ export default function Timeline({
         const newDuration = snap.snappedTo !== null
           ? Math.max(0.1, Math.min(maxDur, rawDur))
           : Math.round(Math.max(0.1, Math.min(maxDur, rawDur)) * 100) / 100
-        const newSourceIn = Math.max(0, dragState.originalSourceOut - rate * newDuration)
+        const newSourceIn = Math.max(dragState.sourceMin, dragState.originalSourceOut - rate * newDuration)
         const newStart = snap.snappedTo !== null ? rightEdge - newDuration : Math.round((rightEdge - newDuration) * 100) / 100
         const obj = objects.find((o) => o.id === dragState.objectId)
         if (obj) {
@@ -333,10 +395,10 @@ export default function Timeline({
         }
       } else if (dragState.kind === 'trim-right') {
         // Right-trim: rate constant, startTime fixed. Reveal a different sourceOut. Bounded by the
-        // asset length (sourceOut ≤ originalDuration of the asset).
+        // clip's window ceil (sourceOut ≤ sourceMax; = the asset length for un-split clips).
         const origSpan = dragState.originalSourceOut - dragState.originalSourceIn
         const rate = origSpan / dragState.originalDuration
-        const maxDur = (dragState.assetDuration - dragState.originalSourceIn) / rate
+        const maxDur = (dragState.sourceMax - dragState.originalSourceIn) / rate
         const obj = objects.find((o) => o.id === dragState.objectId)
         const startT = obj?.startTime ?? 0 // startTime is fixed during a right-trim
         // Snap the moving RIGHT edge to nearby targets ("trim to the beat", spec 22 R13).
@@ -347,7 +409,7 @@ export default function Timeline({
         const newDuration = snap.snappedTo !== null
           ? Math.max(0.1, Math.min(maxDur, rawDur))
           : Math.round(Math.max(0.1, Math.min(maxDur, rawDur)) * 100) / 100
-        const newSourceOut = Math.min(dragState.assetDuration, dragState.originalSourceIn + rate * newDuration)
+        const newSourceOut = Math.min(dragState.sourceMax, dragState.originalSourceIn + rate * newDuration)
         if (obj) {
           dispatch({
             type: 'UPDATE_OBJECT_TRANSIENT',
@@ -404,6 +466,20 @@ export default function Timeline({
             updates: { keyframes: zoom.keyframes.map((k, j) => (j === dragState.kfIndex ? { ...k, time: t } : k)) },
           })
         }
+      } else if (dragState.kind === 'effect-move') {
+        const raw = Math.max(0, dragState.originalStartTime + dt)
+        const snap = snapTime(raw, buildSnapCandidates({}), pixelsPerSecond, SNAP_THRESHOLD_PX, alt)
+        setSnapLineTime(snap.snappedTo)
+        const newStart = snap.snappedTo !== null ? snap.time : Math.round(raw * 10) / 10
+        dispatch({ type: 'UPDATE_EFFECT_TRANSIENT', effectId: dragState.effectId, updates: { startTime: newStart } })
+      } else if (dragState.kind === 'effect-resize-right') {
+        const newHold = Math.round(Math.max(0, dragState.originalHold + dt) * 10) / 10
+        dispatch({ type: 'UPDATE_EFFECT_TRANSIENT', effectId: dragState.effectId, updates: { hold: newHold } })
+      } else if (dragState.kind === 'effect-resize-left') {
+        const clampedDt = Math.max(-dragState.originalStartTime, Math.min(dragState.originalHold, dt))
+        const newStart = Math.round((dragState.originalStartTime + clampedDt) * 10) / 10
+        const newHold = Math.round((dragState.originalHold - clampedDt) * 10) / 10
+        dispatch({ type: 'UPDATE_EFFECT_TRANSIENT', effectId: dragState.effectId, updates: { startTime: newStart, hold: newHold } })
       } else if (dragState.kind === 'marker-move') {
         // Below the click threshold, dispatch nothing — a pure click stays a click (no stray
         // transient to commit). Past it, retime with snapping (same targets clips use, minus self).
@@ -445,7 +521,8 @@ export default function Timeline({
       } else if (
         dragState.kind === 'move' ||
         dragState.kind === 'trim-left' || dragState.kind === 'trim-right' ||
-        dragState.kind === 'zoom-move' || dragState.kind === 'zoom-resize-right' || dragState.kind === 'zoom-resize-left'
+        dragState.kind === 'zoom-move' || dragState.kind === 'zoom-resize-right' || dragState.kind === 'zoom-resize-left' ||
+        dragState.kind === 'effect-move' || dragState.kind === 'effect-resize-right' || dragState.kind === 'effect-resize-left'
       ) {
         dispatch({ type: 'COMMIT_TRANSIENT' })
       }
@@ -459,7 +536,7 @@ export default function Timeline({
       window.removeEventListener('mousemove', handleMouseMove)
       window.removeEventListener('mouseup', handleMouseUp)
     }
-  }, [dragState, pixelsPerSecond, dispatch, onSeek, minLane, maxLane, objects, zooms, markers, buildSnapCandidates])
+  }, [dragState, pixelsPerSecond, dispatch, onSeek, minLane, maxLane, objects, zooms, effects, markers, buildSnapCandidates])
 
   // Render ruler ticks
   const ticks: { time: number; label: string; major: boolean }[] = []
@@ -476,6 +553,11 @@ export default function Timeline({
   }
 
   const trackHeight = laneCount * (LANE_HEIGHT + LANE_GAP) + LANE_GAP
+
+  // Effect display rows (spec 23): overlapping effects stack so both stay visible + grabbable. The
+  // Effects track grows to fit the row count; its gutter label matches so the columns stay aligned.
+  const { rows: effectRowMap, count: effectRowCount } = layoutEffectRows(effects ?? [])
+  const effectsTrackHeight = effectRowCount * EFFECT_ROW_HEIGHT
 
   // Helper: visual Y position for a lane number
   const laneToY = (lane: number) => {
@@ -514,6 +596,15 @@ export default function Timeline({
               title="Camera zooms"
             >
               <IconViewfinder size={15} stroke={2} />
+            </div>
+
+            {/* Effects track label — pinned (sticky) below the Camera track (spec 23) */}
+            <div
+              className="sticky z-10 w-full flex items-center justify-center border-b border-r border-border bg-surface"
+              style={{ height: effectsTrackHeight, top: RULER_HEIGHT + CAMERA_TRACK_HEIGHT, color: EFFECT_COLOR }}
+              title="Video effects"
+            >
+              <IconSparkles size={15} stroke={2} />
             </div>
 
             {/* Add lane above CTA (dedicated blank lane row) */}
@@ -781,6 +872,105 @@ export default function Timeline({
               })}
             </div>
 
+            {/* Effects track (pinned top, spec 23): colour/overlay effect envelope bars. Mirrors the
+                Camera track (violet wash), sitting directly below it at top = ruler + camera height. */}
+            <div
+              className="sticky z-[60] border-b border-border"
+              style={{ height: effectsTrackHeight, top: RULER_HEIGHT + CAMERA_TRACK_HEIGHT, background: 'linear-gradient(rgba(217,70,239,0.08), rgba(217,70,239,0.08)), var(--surface-muted)' }}
+              onMouseDown={(e) => {
+                // Click empty effects track: deselect any effect + seek
+                if (e.target === e.currentTarget) {
+                  onSelectEffect(null)
+                  onSeek(clientXToTime(e.clientX))
+                }
+              }}
+            >
+              {(effects ?? []).map((effect) => {
+                const env = effectEnvelope(effect)
+                const left = timeToX(effect.startTime)
+                const width = Math.max(timeToX(env), 8)
+                const inW = timeToX(effect.transitionIn)
+                const outW = timeToX(effect.transitionOut)
+                const isSelected = effect.id === selectedEffectId
+                const row = effectRowMap.get(effect.id) ?? 0
+                return (
+                  <div
+                    key={effect.id}
+                    className="absolute top-0 group"
+                    style={{ left, top: 2 + row * EFFECT_ROW_HEIGHT, width, height: EFFECT_ROW_HEIGHT - 4 }}
+                  >
+                    {/* Left resize handle (adjusts hold, right edge fixed) */}
+                    <div
+                      className="absolute left-0 top-0 w-1.5 h-full cursor-col-resize z-40 hover:bg-white/40"
+                      onMouseDown={(e) => {
+                        e.stopPropagation()
+                        onSelectEffect(effect.id)
+                        setDragState({ kind: 'effect-resize-left', effectId: effect.id, startMouseX: e.clientX, originalStartTime: effect.startTime, originalHold: effect.hold })
+                      }}
+                    />
+
+                    {/* Bar body (drag to retime) */}
+                    <div
+                      className="absolute inset-0 rounded-sm overflow-hidden cursor-grab active:cursor-grabbing"
+                      style={{
+                        backgroundColor: EFFECT_COLOR,
+                        opacity: effect.hidden ? 0.35 : isSelected ? 1 : 0.72,
+                        outline: isSelected ? '2px solid white' : effect.hidden ? '1px dashed rgba(255,255,255,0.7)' : 'none',
+                        outlineOffset: -1,
+                      }}
+                      onMouseDown={(e) => {
+                        e.stopPropagation()
+                        onSelectEffect(effect.id)
+                        setDragState({ kind: 'effect-move', effectId: effect.id, startMouseX: e.clientX, originalStartTime: effect.startTime })
+                      }}
+                    >
+                      {effect.transitionIn > 0 && (
+                        <div
+                          className="absolute top-0 left-0 h-full pointer-events-none"
+                          style={{ width: Math.min(inW, width), background: 'linear-gradient(90deg, rgba(0,0,0,0.4), transparent)' }}
+                        />
+                      )}
+                      {effect.transitionOut > 0 && (
+                        <div
+                          className="absolute top-0 right-0 h-full pointer-events-none"
+                          style={{ width: Math.min(outW, width), background: 'linear-gradient(270deg, rgba(0,0,0,0.4), transparent)' }}
+                        />
+                      )}
+                      <span className="relative text-[10px] text-white px-1.5 truncate pointer-events-none font-semibold" style={{ lineHeight: `${EFFECT_ROW_HEIGHT - 4}px` }}>
+                        {EFFECT_BAR_LABEL[effect.kind]}
+                      </span>
+                    </div>
+
+                    {/* Right resize handle (adjusts hold, left edge fixed) */}
+                    <div
+                      className="absolute right-0 top-0 w-2 h-full cursor-col-resize z-40"
+                      style={{ background: 'rgba(255,255,255,0.25)' }}
+                      onMouseEnter={(e) => { if (!dragState) (e.currentTarget.style.background = 'rgba(255,255,255,0.5)') }}
+                      onMouseLeave={(e) => { (e.currentTarget.style.background = 'rgba(255,255,255,0.25)') }}
+                      onMouseDown={(e) => {
+                        e.stopPropagation()
+                        onSelectEffect(effect.id)
+                        setDragState({ kind: 'effect-resize-right', effectId: effect.id, startMouseX: e.clientX, originalHold: effect.hold })
+                      }}
+                    />
+
+                    {/* Hide toggle — revealed on hover; always shown when hidden (parity with zooms). */}
+                    <button
+                      className={`absolute top-0.5 z-50 flex items-center justify-center rounded text-white hover:bg-white/40 ${effect.hidden ? 'opacity-100 bg-white/40' : 'opacity-0 group-hover:opacity-100'}`}
+                      style={{ right: 11, width: 16, height: 16 }}
+                      title={effect.hidden ? 'Show effect' : 'Hide effect'}
+                      onMouseDown={(e) => {
+                        e.stopPropagation()
+                        dispatch({ type: 'UPDATE_EFFECT', effectId: effect.id, updates: { hidden: !effect.hidden } })
+                      }}
+                    >
+                      <EyeIcon off={!!effect.hidden} />
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+
             {/* Blank lane spacer for "add above" CTA alignment */}
             <div style={{ height: LANE_HEIGHT }} />
 
@@ -793,6 +983,7 @@ export default function Timeline({
                 if (e.target === e.currentTarget) {
                   onSelectObject(null)
                   onSelectZoom(null)
+                  onSelectEffect(null)
                   onSeek(clientXToTime(e.clientX))
                 }
               }}
@@ -816,15 +1007,18 @@ export default function Timeline({
                 const width = Math.max(timeToX(obj.duration), 4)
                 const top = laneToY(obj.lane)
                 const color = TYPE_COLORS[obj.type] ?? '#666'
-                const isSelected = obj.id === selectedObjectId
+                // Highlight every member of the multi-selection (not just the single primary).
+                const isSelected = selectedObjectIds.includes(obj.id)
                 // Media clips (audio/video) trim on both edges; speed is set from the panel slider.
                 const md = obj.type === 'audio' || obj.type === 'video' ? (obj.data as AudioData | VideoData) : null
                 // Trim "ghosts": the played bar (= duration) is solid; the trimmed-off source is drawn
                 // dimmed on each end so the bar keeps its ORIGINAL full length and the trimmed media
                 // stays visible/recoverable — drag a ghost (or the trim handle) back out to restore.
                 const rate = md && obj.duration > 0 ? sourceSpan(md) / obj.duration : 1
-                const leftGhostPx = md ? timeToX(srcIn(md) / rate) : 0
-                const rightGhostPx = md ? timeToX((md.originalDuration - srcOut(md)) / rate) : 0
+                // Ghosts show only recoverable source WITHIN the clip's window [srcMin, srcMax]. A
+                // split collapses that window to the played span, so its halves show no ghosts.
+                const leftGhostPx = md ? timeToX((srcIn(md) - srcMin(md)) / rate) : 0
+                const rightGhostPx = md ? timeToX((srcMax(md) - srcOut(md)) / rate) : 0
 
                 return (
                   <div
@@ -855,7 +1049,7 @@ export default function Timeline({
                         onMouseDown={(e) => {
                           e.stopPropagation()
                           onSelectObject(obj.id)
-                          setDragState({ kind: 'trim-left', objectId: obj.id, startMouseX: e.clientX, originalStartTime: obj.startTime, originalDuration: obj.duration, originalSourceIn: srcIn(md), originalSourceOut: srcOut(md), assetDuration: md.originalDuration })
+                          setDragState({ kind: 'trim-left', objectId: obj.id, startMouseX: e.clientX, originalStartTime: obj.startTime, originalDuration: obj.duration, originalSourceIn: srcIn(md), originalSourceOut: srcOut(md), sourceMin: srcMin(md) })
                         }}
                       />
                     )}
@@ -874,7 +1068,7 @@ export default function Timeline({
                         onMouseDown={(e) => {
                           e.stopPropagation()
                           onSelectObject(obj.id)
-                          setDragState({ kind: 'trim-right', objectId: obj.id, startMouseX: e.clientX, originalDuration: obj.duration, originalSourceIn: srcIn(md), originalSourceOut: srcOut(md), assetDuration: md.originalDuration })
+                          setDragState({ kind: 'trim-right', objectId: obj.id, startMouseX: e.clientX, originalDuration: obj.duration, originalSourceIn: srcIn(md), originalSourceOut: srcOut(md), sourceMax: srcMax(md) })
                         }}
                       />
                     )}
@@ -889,7 +1083,7 @@ export default function Timeline({
                         onMouseDown={(e) => {
                           e.stopPropagation()
                           onSelectObject(obj.id)
-                          setDragState({ kind: 'trim-left', objectId: obj.id, startMouseX: e.clientX, originalStartTime: obj.startTime, originalDuration: obj.duration, originalSourceIn: srcIn(md), originalSourceOut: srcOut(md), assetDuration: md.originalDuration })
+                          setDragState({ kind: 'trim-left', objectId: obj.id, startMouseX: e.clientX, originalStartTime: obj.startTime, originalDuration: obj.duration, originalSourceIn: srcIn(md), originalSourceOut: srcOut(md), sourceMin: srcMin(md) })
                         }}
                       >
                         <span className="text-[9px] text-black font-bold leading-none pointer-events-none opacity-0 group-hover:opacity-100">[</span>
@@ -917,16 +1111,33 @@ export default function Timeline({
                       }}
                       onMouseDown={(e) => {
                         e.stopPropagation()
-                        onSelectObject(obj.id)
+                        // Shift-click toggles this clip in the multi-selection — no drag starts, so
+                        // you can gather clips across lanes before moving them.
+                        if (e.shiftKey) {
+                          onSelectObject(obj.id, true)
+                          return
+                        }
+                        // Grabbing a clip already in a multi-selection moves the WHOLE group and keeps
+                        // the selection; grabbing any other clip collapses to just it.
+                        const inGroup = selectedObjectIds.length > 1 && selectedObjectIds.includes(obj.id)
+                        if (!inGroup) onSelectObject(obj.id)
+                        const groupIds = inGroup ? selectedObjectIds : [obj.id]
+                        const group = groupIds
+                          .map((id) => objects.find((o) => o.id === id))
+                          .filter((o): o is TimelineObject => !!o)
+                          .map((o) => ({ objectId: o.id, originalStartTime: o.startTime, originalLane: o.lane }))
+                        const groupLanes = group.map((g) => g.originalLane)
                         setDragState({
                           kind: 'move',
                           objectId: obj.id,
                           startMouseX: e.clientX,
                           startMouseY: e.clientY,
                           originalStartTime: obj.startTime,
-                          originalLane: obj.lane,
-                          clampMinLane: minLane,
-                          clampMaxLane: maxLane,
+                          group,
+                          minGroupStart: Math.min(...group.map((g) => g.originalStartTime)),
+                          // Bound the shared lane delta so no member leaves [minLane, maxLane].
+                          clampMinLaneDelta: minLane - Math.min(...groupLanes),
+                          clampMaxLaneDelta: maxLane - Math.max(...groupLanes),
                         })
                       }}
                     >
@@ -1072,7 +1283,7 @@ export default function Timeline({
                             onMouseDown={(e) => {
                               e.stopPropagation()
                               onSelectObject(obj.id)
-                              setDragState({ kind: 'trim-right', objectId: obj.id, startMouseX: e.clientX, originalDuration: obj.duration, originalSourceIn: srcIn(md), originalSourceOut: srcOut(md), assetDuration: md.originalDuration })
+                              setDragState({ kind: 'trim-right', objectId: obj.id, startMouseX: e.clientX, originalDuration: obj.duration, originalSourceIn: srcIn(md), originalSourceOut: srcOut(md), sourceMax: srcMax(md) })
                             }}
                           >
                             <span className="text-[9px] text-black font-bold leading-none pointer-events-none opacity-0 group-hover:opacity-100">]</span>

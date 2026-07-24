@@ -1,6 +1,7 @@
 import type { Project, PhotoData, AudioData, VideoData } from '../types'
 import { renderFrame, loadImage } from './renderer'
 import { resolveCamera } from './camera'
+import { resolveEffects } from './effects'
 import { clipRate, sourceTimeAt, srcIn, sourceSpan, effectiveVolume } from './mediaTiming'
 import { getAssetUrl, getAssetBlob } from './assetStore'
 import { createVideoFrameSource, type VideoFrameSource } from './videoDecoder'
@@ -361,10 +362,11 @@ async function exportWithWebCodecs(
         }
       }
 
-      // Composite all objects onto canvas (with the camera transform, spec 13 — export always
-      // renders the real camera so the MP4 matches Live-view preview).
+      // Composite all objects onto canvas (with the camera transform, spec 13, + render-wide effects,
+      // spec 23 — export always renders the real camera + effects so the MP4 matches Live preview).
       renderFrame(ctx, objects, globalTime, { width, height }, imageCache, {
         camera: resolveCamera(project.zooms, globalTime),
+        effects: resolveEffects(project.effects, globalTime),
       })
 
       // Encode canvas as video frame (no real-time delay!)
@@ -775,6 +777,7 @@ async function exportWithMediaRecorder(
 
     renderFrame(ctx, objects, globalTime, { width, height }, imageCache, {
       camera: resolveCamera(project.zooms, globalTime),
+      effects: resolveEffects(project.effects, globalTime),
     })
 
     // @ts-expect-error - requestFrame exists on CanvasCaptureMediaStreamTrack

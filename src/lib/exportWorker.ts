@@ -2,6 +2,7 @@ import type { PhotoData, VideoData, Project } from '../types'
 import type { ExportWorkerRequest, ExportWorkerResponse, RenderedAudio, EncodeConfig } from './exportWorkerTypes'
 import { renderFrame } from './renderer'
 import { resolveCamera } from './camera'
+import { resolveEffects } from './effects'
 import { sourceTimeAt } from './mediaTiming'
 import { createVideoFrameSource, type VideoFrameSource } from './videoDecoder'
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer'
@@ -171,9 +172,10 @@ async function runExport(
       }
     }
 
-    // Composite all objects onto canvas (with the camera transform, spec 13)
+    // Composite all objects onto canvas (with the camera transform, spec 13, + effects, spec 23)
     renderFrame(ctx, objects, globalTime, { width, height }, imageCache, {
       camera: resolveCamera(project.zooms, globalTime),
+      effects: resolveEffects(project.effects, globalTime),
     })
 
     // Encode canvas as video frame

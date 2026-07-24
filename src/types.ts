@@ -142,6 +142,8 @@ export type AudioData = {
   waveform?: number[]       // ~200 peak values for visualization
   sourceIn?: number         // trim: source seconds where playback begins; default 0 (spec 14)
   sourceOut?: number        // trim: source seconds where playback ends; default originalDuration
+  sourceMin?: number        // recoverable-source window floor: sourceIn can't trim below this; default 0. A split narrows it so the halves read as untrimmed clips (no ghosts).
+  sourceMax?: number        // recoverable-source window ceil: sourceOut can't trim past this; default originalDuration
 }
 
 export type VideoData = {
@@ -152,6 +154,8 @@ export type VideoData = {
   waveform?: number[]       // ~200 peak values of the video's audio track, for the timeline bar
   sourceIn?: number         // trim: source seconds where playback begins; default 0 (spec 14)
   sourceOut?: number        // trim: source seconds where playback ends; default originalDuration
+  sourceMin?: number        // recoverable-source window floor: sourceIn can't trim below this; default 0. A split narrows it so the halves read as untrimmed clips (no ghosts).
+  sourceMax?: number        // recoverable-source window ceil: sourceOut can't trim past this; default originalDuration
 }
 
 // === Camera (spec 13) ===
@@ -196,6 +200,55 @@ export type CameraZoom = {
 
 export const IDENTITY_CAMERA: CameraState = { x: 0.5, y: 0.5, scale: 1 }
 
+// === Video effects (spec 23) ===
+
+// A render-wide, timeline-scheduled full-frame effect. Two render styles share this one type:
+//   - colour-grade kinds ('grayscale'|'sepia'|'invert') → a ctx.filter string over the whole frame
+//   - overlay kinds ('vignette') → a custom shape drawn on top of the graded frame
+// NOT a TimelineObject and NOT a CameraZoom — a third project-level entity (like Marker/CameraZoom).
+// It shares the zoom ENVELOPE shape (startTime/transitionIn/hold/transitionOut/easing) so the
+// timeline lengthen/shorten drag code and the ease-in/hold/ease-out mental model transfer directly.
+// Extensible: future kinds (underwater/heat) add to the union + a renderer branch.
+//   - 'grain' is the first TIME-ANIMATED effect (moving film grain) — an overlay whose noise shifts
+//     each frame (deterministically from the time), so preview and export animate identically.
+//   - 'oldfilm' layers vintage-projector damage (scratches, dust, gate-weave jitter, exposure
+//     flicker) on top of grain — compose it with a vignette + sepia for an "old cowboy film" look.
+export type VideoEffectKind = 'grayscale' | 'sepia' | 'invert' | 'vignette' | 'grain' | 'oldfilm'
+
+// Per-kind params. Absent for the colour kinds; present for vignette. (The `kind + optional payload`
+// shape mirrors TimelineObject { type, data }.)
+export type VignetteShape = 'rectangle' | 'circle' // rectangle = "screen size" (matches the frame)
+export type VignetteParams = {
+  shape: VignetteShape
+  size: number     // 0–1: extent of the fully-clear central region (relative to the frame)
+  feather: number  // 0–1: softness / "blur distance" of the fade from clear to black
+}
+
+// Old-film params. `wobble` is the gate-weave (frame jitter) amplitude, DECOUPLED from `intensity`
+// (which drives scratches/dust/flicker) so you can have heavy grain with a steady frame, or vice
+// versa. Defaults to 0 (no weave) on a new effect.
+export type OldFilmParams = {
+  wobble: number   // 0–1: how much the whole frame hops/jitters per frame (0 = rock steady)
+}
+
+export type VideoEffect = {
+  id: string
+  kind: VideoEffectKind
+  intensity: number      // 0–1 peak strength: the filter amount (colour) / the darkness (vignette)
+  startTime: number      // global seconds — when the ease-in begins
+  transitionIn: number   // seconds to ramp intensity 0 -> intensity
+  hold: number           // seconds held at full intensity
+  transitionOut: number  // seconds to ramp intensity -> 0
+  easing: EasingKind     // reused spec-12 curve, applied to both ramps (mirrors CameraZoom.easing)
+  vignette?: VignetteParams // present only when kind === 'vignette'
+  oldfilm?: OldFilmParams   // present only when kind === 'oldfilm'
+  hidden?: boolean        // spec 14 R11 parity: skipped in resolveEffects when true
+}
+
+// The resolved effect stack at an instant — what renderFrame consumes (mirrors CameraState).
+// `intensity` is already eased; per-kind params carried through for the overlay branch.
+export type ResolvedEffect = { kind: VideoEffectKind; intensity: number; vignette?: VignetteParams; oldfilm?: OldFilmParams }
+
 // === Markers (spec 22) ===
 
 // A user-placed timeline marker ("bookmark"). NOT a TimelineObject — a lightweight, project-level
@@ -234,6 +287,7 @@ export type Project = {
   assets: AssetMeta[]
   zooms?: CameraZoom[]      // camera punch-ins (spec 13); optional/additive for back-compat
   markers?: Marker[]        // timeline markers (spec 22); optional/additive for back-compat
+  effects?: VideoEffect[]   // render-wide colour/overlay effects (spec 23); optional/additive
 }
 
 // === Interaction Modes ===
@@ -259,6 +313,10 @@ export type ProjectAction =
   | { type: 'UPDATE_ZOOM'; zoomId: string; updates: Partial<Omit<CameraZoom, 'id'>> }
   | { type: 'UPDATE_ZOOM_TRANSIENT'; zoomId: string; updates: Partial<Omit<CameraZoom, 'id'>> }
   | { type: 'REMOVE_ZOOM'; zoomId: string }
+  | { type: 'ADD_EFFECT'; effect: VideoEffect }
+  | { type: 'UPDATE_EFFECT'; effectId: string; updates: Partial<Omit<VideoEffect, 'id'>> }
+  | { type: 'UPDATE_EFFECT_TRANSIENT'; effectId: string; updates: Partial<Omit<VideoEffect, 'id'>> }
+  | { type: 'REMOVE_EFFECT'; effectId: string }
   | { type: 'ADD_MARKER'; marker: Marker }
   | { type: 'UPDATE_MARKER'; markerId: string; updates: Partial<Omit<Marker, 'id'>> }
   | { type: 'UPDATE_MARKER_TRANSIENT'; markerId: string; updates: Partial<Omit<Marker, 'id'>> }
@@ -295,6 +353,29 @@ export function createCameraZoom(options?: Partial<Omit<CameraZoom, 'id'>>): Cam
     transitionOut: options?.transitionOut ?? 0.6,
     easing: options?.easing ?? 'easeInOutCubic',
   }
+}
+
+// Default parameters for a freshly-created effect (spec 23). Mirrors createCameraZoom's envelope
+// defaults; vignette kinds additionally seed a sensible VignetteParams.
+export function createVideoEffect(kind: VideoEffectKind, options?: Partial<Omit<VideoEffect, 'id' | 'kind'>>): VideoEffect {
+  const effect: VideoEffect = {
+    id: crypto.randomUUID(),
+    kind,
+    // Grain / old-film read best subtle — seed them lower than the full-strength colour/vignette default.
+    intensity: options?.intensity ?? (kind === 'grain' || kind === 'oldfilm' ? 0.5 : 1),
+    startTime: options?.startTime ?? 0,
+    transitionIn: options?.transitionIn ?? 0.4,
+    hold: options?.hold ?? 2,
+    transitionOut: options?.transitionOut ?? 0.4,
+    easing: options?.easing ?? 'easeInOutCubic',
+  }
+  if (kind === 'vignette') {
+    effect.vignette = options?.vignette ?? { shape: 'rectangle', size: 0.6, feather: 0.4 }
+  }
+  if (kind === 'oldfilm') {
+    effect.oldfilm = options?.oldfilm ?? { wobble: 0 } // steady frame by default; opt into weave
+  }
+  return effect
 }
 
 // A freshly-created marker at the given time (defaults to 0). label/color left unset so the
