@@ -10,9 +10,27 @@
     <title>Gerty</title>
   </head>
   <body>
+    <!-- Blocking screen for devices too small for the editor (see .small-screen-block in index.css) -->
+    <div
+      class="small-screen-block"
+      role="alertdialog"
+      aria-label="Device too small"
+    >
+      <div class="small-screen-block__card">
+        <div class="small-screen-block__emoji">🎬</div>
+        <h1>Gerty isn't mobile friendly&nbsp;yet</h1>
+        <p>
+          Gerty is a full desktop video editor and needs a bigger screen to
+          work. Please open it on a laptop or desktop.
+        </p>
+      </div>
+    </div>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
     <!-- 100% privacy-first analytics -->
-    <script async src="https://scripts.simpleanalyticscdn.com/latest.js"></script>
+    <script
+      async
+      src="https://scripts.simpleanalyticscdn.com/latest.js"
+    ></script>
   </body>
 </html>
