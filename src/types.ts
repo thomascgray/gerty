@@ -113,6 +113,8 @@ export type TextEffect =
   | { kind: 'rainbow';  speed: number }                               // fill hue cycle
   | { kind: 'wave';     speed: number; amplitude: number }            // per-glyph vertical travel (px, project-space)
   | { kind: 'shimmer';  speed: number; color: string }                // sweeping highlight band
+  | { kind: 'warble';   speed: number; amount: number }               // faux-3D axis wobble (near edge precesses L→T→R→B)
+  | { kind: 'glitch';   speed: number; amount: number }               // RGB-split + horizontal slice tearing + dropouts
 
 export type TextEffectKind = TextEffect['kind']
 
@@ -213,7 +215,17 @@ export const IDENTITY_CAMERA: CameraState = { x: 0.5, y: 0.5, scale: 1 }
 //     each frame (deterministically from the time), so preview and export animate identically.
 //   - 'oldfilm' layers vintage-projector damage (scratches, dust, gate-weave jitter, exposure
 //     flicker) on top of grain — compose it with a vignette + sepia for an "old cowboy film" look.
-export type VideoEffectKind = 'grayscale' | 'sepia' | 'invert' | 'vignette' | 'grain' | 'oldfilm'
+export type VideoEffectKind =
+  | 'grayscale' | 'sepia' | 'invert' | 'vignette' | 'grain' | 'oldfilm'
+  // spec 24 (first slice):
+  // Tier 1 — CSS ctx.filter colour grades (no overlay/per-pixel work):
+  | 'hue' | 'contrast' | 'bleach'
+  // Tier 2 — blend/overlay:
+  | 'lightleak' | 'chromatic' | 'pixelate'
+  // Per-pixel effects run as WebGL fragment-shader passes (spec 25) — NOT Canvas 2D (a getImageData
+  // readback per frame is too slow, spec 24 D3). See src/lib/glEffects.ts + SPECS/25-webgl-effects.md.
+  | 'gradientmap' | 'posterize' | 'threshold' | 'channelswap' | 'colorisolate' | 'dither'
+  | 'crt' | 'vhs' | 'halftone' | 'comic'
 
 // Per-kind params. Absent for the colour kinds; present for vignette. (The `kind + optional payload`
 // shape mirrors TimelineObject { type, data }.)
@@ -231,6 +243,56 @@ export type OldFilmParams = {
   wobble: number   // 0–1: how much the whole frame hops/jitters per frame (0 = rock steady)
 }
 
+// === spec 24 per-kind params ===
+// Additive optional payloads (same shape decision as vignette/oldfilm — spec 24 D1). Only the kinds
+// that need more than `intensity` carry one; contrast/bleach/pixelate map intensity directly.
+
+// Hue rotation. Static: rotate by `angle`·intensity. Animated: continuously cycle at `speed` deg/sec
+// (a psychedelic loop), derived from globalTime so preview/export match. Animated mode is a hard
+// on/off at the envelope edges (CSS hue-rotate has no alpha) — set ease in/out to 0 or accept the pop.
+export type HueParams = {
+  animate: boolean
+  angle: number    // degrees (static mode); 0–360
+  speed: number    // degrees/sec (animated mode)
+}
+
+// Light leak: a drifting coloured gradient composited in `screen` blend. `angle` orients the streak,
+// `speed` drives its drift across the frame (from globalTime). `color` is the leak tint.
+export type LightLeakParams = {
+  color: string    // hex, e.g. '#ff7a18'
+  angle: number    // degrees — orientation of the leak streak
+  speed: number    // drift units/sec
+}
+
+// RGB channel split (chromatic aberration). `offset` = peak channel separation in px at intensity 1;
+// `angle` = direction the red/blue channels pull apart. Rendered via 3 tinted composites (no per-pixel).
+export type ChromaticParams = {
+  offset: number   // px at intensity 1
+  angle: number    // degrees
+}
+
+// Gradient map / false colour (spec 25, WebGL shader): map per-pixel luminance through a named ramp.
+export type GradientMapPreset = 'thermal' | 'nightvision' | 'infrared' | 'risograph' | 'cinematic' | 'cinemacool'
+export type GradientMapParams = {
+  preset: GradientMapPreset
+}
+
+// More WebGL per-pixel effects (spec 25). All blended toward the original by the eased `intensity`.
+export type PosterizeParams = { levels: number }              // 2–16 quantization bands per channel
+export type ThresholdParams = { dark: string; light: string; threshold: number } // duotone, threshold 0–1
+export type ChannelSwapMapping = 'rbg' | 'grb' | 'brg' | 'bgr' | 'gbr'  // RGB permutation (rgb = identity, omitted)
+export type ChannelSwapParams = { mapping: ChannelSwapMapping }
+export type ColorIsolateParams = { hue: number; tolerance: number }  // hue 0–360°, tolerance 0–180°
+export type DitherParams = { levels: number; scale: number }  // levels 2–6, scale = px per dither cell (1–8)
+
+// Composite "look" shaders (spec 25 batch 2). CRT/VHS are TIME-ANIMATED (flicker/noise/wobble driven
+// by a uTime uniform derived from globalTime → deterministic, preview==export).
+export type CrtParams = { curvature: number; scanline: number; zoom: number } // curvature 0–1 barrel, scanline 0–1 darkness, zoom 0–1 crops the black bezel
+export type VhsParams = { bleed: number; noise: number }        // bleed 0–1 chroma split, noise 0–1 tracking
+export type HalftoneParams = { cell: number; angle: number }    // cell px (2–16), screen angle degrees
+export type ComicParams = { levels: number; thickness: number } // posterized base levels (2–8) + ink line thickness (0.5–3)
+
+
 export type VideoEffect = {
   id: string
   kind: VideoEffectKind
@@ -242,12 +304,44 @@ export type VideoEffect = {
   easing: EasingKind     // reused spec-12 curve, applied to both ramps (mirrors CameraZoom.easing)
   vignette?: VignetteParams // present only when kind === 'vignette'
   oldfilm?: OldFilmParams   // present only when kind === 'oldfilm'
+  // spec 24 per-kind payloads (present only for their kind):
+  hue?: HueParams
+  lightleak?: LightLeakParams
+  chromatic?: ChromaticParams
+  gradientmap?: GradientMapParams
+  posterize?: PosterizeParams
+  threshold?: ThresholdParams
+  channelswap?: ChannelSwapParams
+  colorisolate?: ColorIsolateParams
+  dither?: DitherParams
+  crt?: CrtParams
+  vhs?: VhsParams
+  halftone?: HalftoneParams
+  comic?: ComicParams
   hidden?: boolean        // spec 14 R11 parity: skipped in resolveEffects when true
 }
 
 // The resolved effect stack at an instant — what renderFrame consumes (mirrors CameraState).
-// `intensity` is already eased; per-kind params carried through for the overlay branch.
-export type ResolvedEffect = { kind: VideoEffectKind; intensity: number; vignette?: VignetteParams; oldfilm?: OldFilmParams }
+// `intensity` is already eased; per-kind params carried through for the overlay / per-pixel branches.
+export type ResolvedEffect = {
+  kind: VideoEffectKind
+  intensity: number
+  vignette?: VignetteParams
+  oldfilm?: OldFilmParams
+  hue?: HueParams
+  lightleak?: LightLeakParams
+  chromatic?: ChromaticParams
+  gradientmap?: GradientMapParams
+  posterize?: PosterizeParams
+  threshold?: ThresholdParams
+  channelswap?: ChannelSwapParams
+  colorisolate?: ColorIsolateParams
+  dither?: DitherParams
+  crt?: CrtParams
+  vhs?: VhsParams
+  halftone?: HalftoneParams
+  comic?: ComicParams
+}
 
 // === Markers (spec 22) ===
 
@@ -305,7 +399,7 @@ export type ProjectAction =
   | { type: 'UPDATE_OBJECT'; objectId: string; updates: Partial<Omit<TimelineObject, 'id' | 'type'>> }
   | { type: 'UPDATE_OBJECT_TRANSIENT'; objectId: string; updates: Partial<Omit<TimelineObject, 'id' | 'type'>> }
   | { type: 'COMMIT_TRANSIENT' }
-  | { type: 'DUPLICATE_OBJECT'; objectId: string }
+  | { type: 'DUPLICATE_OBJECT'; objectId: string; newId?: string; startTime?: number }
   | { type: 'SPLIT_OBJECT'; objectId: string; globalTime: number }  // spec 14 R10: atomic slice-at-playhead (one undo entry)
   | { type: 'REMOVE_LANE'; lane: number }
   | { type: 'ADD_ASSETS'; assets: AssetMeta[] }
@@ -314,6 +408,7 @@ export type ProjectAction =
   | { type: 'UPDATE_ZOOM_TRANSIENT'; zoomId: string; updates: Partial<Omit<CameraZoom, 'id'>> }
   | { type: 'REMOVE_ZOOM'; zoomId: string }
   | { type: 'ADD_EFFECT'; effect: VideoEffect }
+  | { type: 'ADD_EFFECTS'; effects: VideoEffect[] }  // spec 26: apply a preset stack as one undo entry
   | { type: 'UPDATE_EFFECT'; effectId: string; updates: Partial<Omit<VideoEffect, 'id'>> }
   | { type: 'UPDATE_EFFECT_TRANSIENT'; effectId: string; updates: Partial<Omit<VideoEffect, 'id'>> }
   | { type: 'REMOVE_EFFECT'; effectId: string }
@@ -324,7 +419,7 @@ export type ProjectAction =
   | { type: 'CLEAR_MARKERS' }
   | { type: 'UNDO' }
   | { type: 'REDO' }
-  | { type: 'MARK_SAVED' }  // clears the unsaved-changes flag after a .brep export (no history change)
+  | { type: 'MARK_SAVED' }  // clears the unsaved-changes flag after a .tve export (no history change)
 
 // === Factory Functions ===
 
@@ -361,12 +456,20 @@ export function createVideoEffect(kind: VideoEffectKind, options?: Partial<Omit<
   const effect: VideoEffect = {
     id: crypto.randomUUID(),
     kind,
-    // Grain / old-film read best subtle — seed them lower than the full-strength colour/vignette default.
-    intensity: options?.intensity ?? (kind === 'grain' || kind === 'oldfilm' ? 0.5 : 1),
+    // Grain / old-film / light-leak / chromatic read best subtle — seed them lower than the
+    // full-strength colour/vignette default. Pixelate at 1 would be extremely chunky → seed mid.
+    intensity: options?.intensity ??
+      (kind === 'grain' || kind === 'oldfilm' || kind === 'lightleak' || kind === 'chromatic'
+        ? 0.5
+        : kind === 'pixelate'
+          ? 0.4
+          : 1),
     startTime: options?.startTime ?? 0,
-    transitionIn: options?.transitionIn ?? 0.4,
+    // Default to no in/out ramp so a freshly-added effect shows at full strength immediately;
+    // the user can dial in a fade from the panel. Presets can still pass their own transitions.
+    transitionIn: options?.transitionIn ?? 0,
     hold: options?.hold ?? 2,
-    transitionOut: options?.transitionOut ?? 0.4,
+    transitionOut: options?.transitionOut ?? 0,
     easing: options?.easing ?? 'easeInOutCubic',
   }
   if (kind === 'vignette') {
@@ -374,6 +477,46 @@ export function createVideoEffect(kind: VideoEffectKind, options?: Partial<Omit<
   }
   if (kind === 'oldfilm') {
     effect.oldfilm = options?.oldfilm ?? { wobble: 0 } // steady frame by default; opt into weave
+  }
+  // spec 24 per-kind defaults
+  if (kind === 'hue') {
+    effect.hue = options?.hue ?? { animate: false, angle: 90, speed: 60 }
+  }
+  if (kind === 'lightleak') {
+    effect.lightleak = options?.lightleak ?? { color: '#ff7a18', angle: 30, speed: 0.15 }
+  }
+  if (kind === 'chromatic') {
+    effect.chromatic = options?.chromatic ?? { offset: 8, angle: 0 }
+  }
+  if (kind === 'gradientmap') {
+    effect.gradientmap = options?.gradientmap ?? { preset: 'thermal' }
+  }
+  if (kind === 'posterize') {
+    effect.posterize = options?.posterize ?? { levels: 5 }
+  }
+  if (kind === 'threshold') {
+    effect.threshold = options?.threshold ?? { dark: '#1a1a2e', light: '#e8e8e8', threshold: 0.5 }
+  }
+  if (kind === 'channelswap') {
+    effect.channelswap = options?.channelswap ?? { mapping: 'brg' }
+  }
+  if (kind === 'colorisolate') {
+    effect.colorisolate = options?.colorisolate ?? { hue: 0, tolerance: 30 }
+  }
+  if (kind === 'dither') {
+    effect.dither = options?.dither ?? { levels: 3, scale: 2 }
+  }
+  if (kind === 'crt') {
+    effect.crt = options?.crt ?? { curvature: 0.3, scanline: 0.5, zoom: 0.3 }
+  }
+  if (kind === 'vhs') {
+    effect.vhs = options?.vhs ?? { bleed: 0.5, noise: 0.4 }
+  }
+  if (kind === 'halftone') {
+    effect.halftone = options?.halftone ?? { cell: 6, angle: 45 }
+  }
+  if (kind === 'comic') {
+    effect.comic = options?.comic ?? { levels: 4, thickness: 1 }
   }
   return effect
 }

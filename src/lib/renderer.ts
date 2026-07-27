@@ -1,4 +1,4 @@
-import type { TimelineObject, ArrowData, TextData, FreehandData, PhotoData, VideoData, ObjectStyle, CameraState, ResolvedEffect, VignetteParams } from '../types'
+import type { TimelineObject, ArrowData, TextData, FreehandData, PhotoData, VideoData, ObjectStyle, CameraState, ResolvedEffect, VignetteParams, ChromaticParams, LightLeakParams } from '../types'
 import {
   drawArrow,
   drawText,
@@ -9,6 +9,7 @@ import {
 import { resolveRenderPose } from './keyframes'
 import { isIdentityCamera } from './camera'
 import { effectsToFilterString } from './effects'
+import { applyShaderEffects, isShaderEffect } from './glEffects'
 import { clamp01 } from './easing'
 
 export type EditorOptions = {
@@ -95,8 +96,8 @@ export function renderFrame(
   // No active effects ⇒ this whole block is skipped ⇒ output is pixel-identical to pre-spec-23.
   const fx = editorOptions?.effects
   if (fx && fx.length > 0) {
-    // (a) colour-grade branch
-    const filter = effectsToFilterString(fx)
+    // (a) colour-grade branch — all CSS-filter kinds batched into one self-composited redraw.
+    const filter = effectsToFilterString(fx, globalTime)
     if (filter) {
       ctx.save()
       ctx.filter = filter
@@ -120,6 +121,36 @@ export function renderFrame(
         ctx.save()
         ctx.filter = 'none'
         drawOldFilm(ctx, w, h, e.intensity, e.oldfilm?.wobble ?? 0, globalTime)
+        ctx.restore()
+      } else if (e.kind === 'chromatic' && e.chromatic) {
+        ctx.save()
+        ctx.filter = 'none'
+        drawChromatic(ctx, w, h, e.intensity, e.chromatic)
+        ctx.restore()
+      } else if (e.kind === 'pixelate') {
+        ctx.save()
+        ctx.filter = 'none'
+        drawPixelate(ctx, w, h, e.intensity)
+        ctx.restore()
+      } else if (e.kind === 'lightleak' && e.lightleak) {
+        ctx.save()
+        ctx.filter = 'none'
+        drawLightLeak(ctx, w, h, e.intensity, e.lightleak, globalTime)
+        ctx.restore()
+      }
+    }
+    // (c) WebGL shader branch (spec 25) — per-pixel effects run as GPU fragment passes over the
+    // already-composited + 2D-graded frame, then the result is drawn back onto the 2D canvas. No
+    // getImageData readback. Runs after (a)+(b) (hybrid, decision D1). If WebGL is unavailable/lost,
+    // applyShaderEffects returns null and we leave the 2D frame untouched (graceful fallback).
+    const shaderFx = fx.filter((e) => isShaderEffect(e.kind))
+    if (shaderFx.length > 0) {
+      const glCanvas = applyShaderEffects(ctx.canvas, shaderFx, globalTime, { width: w, height: h })
+      if (glCanvas) {
+        ctx.save()
+        ctx.filter = 'none'
+        ctx.globalCompositeOperation = 'copy'
+        ctx.drawImage(glCanvas as CanvasImageSource, 0, 0)
         ctx.restore()
       }
     }
@@ -381,6 +412,150 @@ function drawOldFilm(
     )
     ctx.stroke()
   }
+}
+
+// === spec 24 overlay effects ===
+
+type AnyCanvas = OffscreenCanvas | HTMLCanvasElement
+type AnyCtx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D
+
+function makeCanvas(w: number, h: number): AnyCanvas {
+  return typeof OffscreenCanvas !== 'undefined'
+    ? new OffscreenCanvas(w, h)
+    : Object.assign(document.createElement('canvas'), { width: w, height: h })
+}
+
+// Dedicated scratch canvases for the chromatic split (it holds a frame snapshot while building three
+// channel-tinted copies, so it needs two buffers that don't clash with the shared oldfilm scratch).
+let chromaSnap: AnyCanvas | null = null
+let chromaTint: AnyCanvas | null = null
+function getChromaCanvases(w: number, h: number): { snap: AnyCanvas; tint: AnyCanvas } | null {
+  if (!chromaSnap || chromaSnap.width !== w || chromaSnap.height !== h) {
+    chromaSnap = makeCanvas(w, h); chromaSnap.width = w; chromaSnap.height = h
+  }
+  if (!chromaTint || chromaTint.width !== w || chromaTint.height !== h) {
+    chromaTint = makeCanvas(w, h); chromaTint.width = w; chromaTint.height = h
+  }
+  return { snap: chromaSnap, tint: chromaTint }
+}
+
+/** Parse a #rgb / #rrggbb hex into [r,g,b] (defaults to white on a bad value). */
+function hexToRgb(hex: string): [number, number, number] {
+  let h = hex.replace('#', '').trim()
+  if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2]
+  const n = parseInt(h, 16)
+  if (h.length !== 6 || Number.isNaN(n)) return [255, 255, 255]
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255]
+}
+
+/**
+ * RGB channel split / chromatic aberration (spec 24). Draws the frame three times — one per colour
+ * channel, isolated via a `multiply` tint and offset along `angle` — then recombines them with the
+ * `lighter` (additive) blend, so the red/blue fringes pull apart. Pure blend-mode work, no per-pixel.
+ */
+function drawChromatic(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  intensity: number,
+  params: ChromaticParams,
+) {
+  const offset = params.offset * clamp01(intensity)
+  if (offset < 0.5) return
+  const rad = (params.angle * Math.PI) / 180
+  const dx = Math.cos(rad) * offset
+  const dy = Math.sin(rad) * offset
+
+  const bufs = getChromaCanvases(w, h)
+  if (!bufs) return
+  const snapCtx = bufs.snap.getContext('2d') as AnyCtx | null
+  const tintCtx = bufs.tint.getContext('2d') as AnyCtx | null
+  if (!snapCtx || !tintCtx) return
+
+  // Snapshot the current frame.
+  snapCtx.globalCompositeOperation = 'source-over'
+  snapCtx.clearRect(0, 0, w, h)
+  snapCtx.drawImage(ctx.canvas, 0, 0)
+
+  // Reset the main canvas to black, then additively add each isolated, offset channel.
+  ctx.fillStyle = '#000'
+  ctx.fillRect(0, 0, w, h)
+  ctx.globalCompositeOperation = 'lighter'
+
+  const channels: Array<{ tint: string; ox: number; oy: number }> = [
+    { tint: '#ff0000', ox: dx, oy: dy },   // red pulls one way
+    { tint: '#00ff00', ox: 0, oy: 0 },     // green stays centred
+    { tint: '#0000ff', ox: -dx, oy: -dy }, // blue pulls the other
+  ]
+  for (const ch of channels) {
+    // Isolate the channel: draw the snapshot, then multiply by a pure-channel fill.
+    tintCtx.globalCompositeOperation = 'source-over'
+    tintCtx.clearRect(0, 0, w, h)
+    tintCtx.drawImage(bufs.snap, 0, 0)
+    tintCtx.globalCompositeOperation = 'multiply'
+    tintCtx.fillStyle = ch.tint
+    tintCtx.fillRect(0, 0, w, h)
+    ctx.drawImage(bufs.tint as CanvasImageSource, ch.ox, ch.oy)
+  }
+}
+
+/**
+ * Pixelate (spec 24): downscale the frame to a small buffer then draw it back up with smoothing off,
+ * so pixels grow into blocks. Cell size grows with intensity (fine → chunky). No per-pixel scan.
+ */
+function drawPixelate(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  intensity: number,
+) {
+  const MAX_CELL = 64
+  const cell = 1 + clamp01(intensity) * MAX_CELL
+  if (cell <= 1.5) return
+  const sw = Math.max(1, Math.round(w / cell))
+  const sh = Math.max(1, Math.round(h / cell))
+  const scratch = getScratchCanvas(w, h)
+  const sctx = scratch?.getContext('2d') as AnyCtx | null
+  if (!sctx) return
+  sctx.globalCompositeOperation = 'source-over'
+  sctx.imageSmoothingEnabled = false
+  sctx.clearRect(0, 0, w, h)
+  sctx.drawImage(ctx.canvas, 0, 0, w, h, 0, 0, sw, sh) // downscale into the top-left
+  ctx.imageSmoothingEnabled = false
+  ctx.globalCompositeOperation = 'copy'
+  ctx.drawImage(scratch as CanvasImageSource, 0, 0, sw, sh, 0, 0, w, h) // upscale back over the frame
+}
+
+/**
+ * Light leak (spec 24): a drifting coloured glow composited in `screen` blend, like light bleeding
+ * onto the film. The glow centre drifts on a looping path driven by `globalTime` (deterministic ⇒
+ * preview == export). `intensity` scales the whole overlay's opacity so it fades with the envelope.
+ */
+function drawLightLeak(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  intensity: number,
+  params: LightLeakParams,
+  time: number,
+) {
+  const a = clamp01(intensity)
+  if (a <= 0) return
+  const [r, g, b] = hexToRgb(params.color)
+  const rad = (params.angle * Math.PI) / 180
+  const t = time * params.speed
+  // Drifting centre — a slow looping path across the frame, phase-shifted by the leak angle.
+  const cx = w * (0.5 + 0.45 * Math.sin(t * Math.PI * 2))
+  const cy = h * (0.5 + 0.45 * Math.cos(t * Math.PI * 2 * 0.6 + rad))
+  const R = Math.hypot(w, h) * 0.55
+  const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, R)
+  grad.addColorStop(0, `rgba(${r},${g},${b},0.9)`)
+  grad.addColorStop(0.5, `rgba(${r},${g},${b},0.35)`)
+  grad.addColorStop(1, `rgba(${r},${g},${b},0)`)
+  ctx.globalCompositeOperation = 'screen'
+  ctx.globalAlpha = a
+  ctx.fillStyle = grad
+  ctx.fillRect(0, 0, w, h)
 }
 
 function drawObject(

@@ -1,6 +1,6 @@
 // Remembers the last-chosen canvas size (aspect ratio / dimensions) so the next NEW/default project
 // opens at that size instead of the hard-coded 1920×1080. This is a *preference*, persisted to
-// localStorage independently of `config.persistProject`, undo/redo, and the `.brep` export — exactly
+// localStorage independently of `config.persistProject`, undo/redo, and the `.tve` export — exactly
 // like `useUiPrefs`. When `persistProject: true` the loaded project carries its own dims; this pref
 // only seeds the `createDefaultProject()` boot path. (Spec 18-qol R3.)
 

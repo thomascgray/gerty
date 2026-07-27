@@ -308,7 +308,7 @@ export function TransitionFields({
 
 // --- Text effects (spec 19) -----------------------------------------------------------------
 export const TEXT_EFFECT_KINDS: TextEffectKind[] = [
-  'glow', 'outline', 'shadow', 'gradient', 'pulse', 'rainbow', 'wave', 'shimmer',
+  'glow', 'outline', 'shadow', 'gradient', 'pulse', 'rainbow', 'wave', 'shimmer', 'warble', 'glitch',
 ]
 export const TEXT_EFFECT_LABELS: Record<TextEffectKind, string> = {
   glow: 'Glow / Neon',
@@ -319,6 +319,8 @@ export const TEXT_EFFECT_LABELS: Record<TextEffectKind, string> = {
   rainbow: 'Rainbow',
   wave: 'Wave',
   shimmer: 'Shimmer',
+  warble: 'Warble (3D)',
+  glitch: 'Glitch',
 }
 // Sensible starting params per kind — picking a kind seeds these; each param stays editable.
 export const DEFAULT_TEXT_EFFECT: Record<TextEffectKind, TextEffect> = {
@@ -330,6 +332,8 @@ export const DEFAULT_TEXT_EFFECT: Record<TextEffectKind, TextEffect> = {
   rainbow: { kind: 'rainbow', speed: 1 },
   wave: { kind: 'wave', speed: 1, amplitude: 12 },
   shimmer: { kind: 'shimmer', speed: 1, color: '#ffffff' },
+  warble: { kind: 'warble', speed: 1, amount: 1 },
+  glitch: { kind: 'glitch', speed: 1, amount: 0.5 }, // subtle by default
 }
 
 function ColorRow({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
@@ -450,6 +454,22 @@ export function EffectFields({
         <>
           <ColorRow label="Highlight" value={value.color} onChange={(color) => patch({ color })} />
           <SliderRow label="Speed" value={value.speed} min={0.1} max={4} step={0.1} onChange={(speed) => patch({ speed })}
+            fmt={(v) => v.toFixed(1)} />
+        </>
+      )}
+      {value?.kind === 'warble' && (
+        <>
+          <SliderRow label="Speed" value={value.speed} min={0.1} max={4} step={0.1} onChange={(speed) => patch({ speed })}
+            fmt={(v) => v.toFixed(1)} />
+          <SliderRow label="Amount" value={value.amount} min={0.1} max={2} step={0.1} onChange={(amount) => patch({ amount })}
+            fmt={(v) => v.toFixed(1)} />
+        </>
+      )}
+      {value?.kind === 'glitch' && (
+        <>
+          <SliderRow label="Speed" value={value.speed} min={0.1} max={4} step={0.1} onChange={(speed) => patch({ speed })}
+            fmt={(v) => v.toFixed(1)} />
+          <SliderRow label="Amount" value={value.amount} min={0.1} max={2} step={0.1} onChange={(amount) => patch({ amount })}
             fmt={(v) => v.toFixed(1)} />
         </>
       )}

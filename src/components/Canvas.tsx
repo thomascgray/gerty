@@ -110,6 +110,8 @@ type CanvasProps = {
   effects?: VideoEffect[]
   // Floating context toolbar (spec 17 P): "Edit points" for arrow/freehand routes through this.
   onToggleDraw?: () => void
+  // Duplicate routes through App (not a raw dispatch) so the copy lands at the playhead + is selected.
+  onDuplicate?: (objectId: string) => void
 }
 
 // === Constants ===
@@ -472,6 +474,7 @@ export default function Canvas({
   onToggleCameraView,
   effects,
   onToggleDraw,
+  onDuplicate,
 }: CanvasProps) {
   const renderCanvasRef = useRef<HTMLCanvasElement>(null)
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -1418,13 +1421,18 @@ export default function Canvas({
     const visBottom = raRect ? raRect.bottom - fitRect.top : fitRect.height
     const visLeft = raRect ? raRect.left - fitRect.left : 0
     const visRight = raRect ? raRect.right - fitRect.left : fitRect.width
+    // The floating transport pill (App.tsx: `absolute bottom-5`, ~44px pill) lives in the bottom
+    // gutter, so treat that band as off-limits: the toolbar clamps above it and a selection too tall
+    // to fit above OR in the remaining space pins to the top instead of landing on the transport.
+    const TRANSPORT_RESERVE = 72
+    const bottomLimit = visBottom - TRANSPORT_RESERVE
 
     // Decide by whether the bar FITS inside the visible range above vs below; if neither fits (a
     // selection taller than the viewport) pin to the TOP edge, overlapping the selection — keeps it
     // clear of the transport/timeline at the bottom (R2.2). Pin reuses 'below' anchoring (styled top =
     // bar's top edge).
     const roomAbove = topLocal - MARGIN - barH >= visTop + PAD
-    const roomBelow = bottomLocal + MARGIN + barH <= visBottom - PAD
+    const roomBelow = bottomLocal + MARGIN + barH <= bottomLimit - PAD
     const side: 'above' | 'below' = roomAbove ? 'above' : 'below'
     const pinned = !roomAbove && !roomBelow
 
@@ -1434,7 +1442,7 @@ export default function Canvas({
       : side === 'above'
         ? topLocal - MARGIN - barH
         : bottomLocal + MARGIN
-    barTop = Math.max(visTop + PAD, Math.min(visBottom - barH - PAD, barTop))
+    barTop = Math.max(visTop + PAD, Math.min(bottomLimit - barH - PAD, barTop))
     // Convert back to the styled `top` the JSX expects: 'above' uses translateY(-100%) so its styled
     // top is the bar's BOTTOM edge; 'below' (and pin) styled top is the bar's TOP edge.
     const top = side === 'above' ? barTop + barH : barTop
@@ -1624,7 +1632,7 @@ export default function Canvas({
             }}
           >
             {showObjectToolbar && toolbarObject ? (
-              <ContextToolbar object={selectedObjectRaw!} dispatch={dispatch} globalTime={globalTime} onToggleDraw={onToggleDraw} />
+              <ContextToolbar object={selectedObjectRaw!} dispatch={dispatch} globalTime={globalTime} onToggleDraw={onToggleDraw} onDuplicate={onDuplicate} />
             ) : selectedZoom ? (
               <ZoomContextToolbar zoom={selectedZoom} dispatch={dispatch} globalTime={globalTime} onSelectZoom={onSelectZoom} />
             ) : null}

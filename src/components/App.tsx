@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import type { InteractionMode, TimelineObjectType, TimelineObject, ArrowData, FreehandData, VideoEffectKind } from '../types'
 import { createTimelineObject, createCameraZoom, createVideoEffect, createMarker } from '../types'
 import { getRememberedStyle, getRememberedData } from '../lib/objectDefaults'
+import { EFFECT_PRESETS, buildPresetEffects } from '../lib/effectPresets'
 import { useProject } from '../hooks/useProject'
 import { usePlayback } from '../hooks/usePlayback'
 import { useAudioPlayback } from '../hooks/useAudioPlayback'
@@ -205,7 +206,7 @@ export default function App() {
 
   const handleExportProject = useCallback(async () => {
     await exportProjectBrep(project)
-    markSaved() // the .brep file now matches the in-memory project → clear the unsaved-changes guard
+    markSaved() // the .tve file now matches the in-memory project → clear the unsaved-changes guard
   }, [project, markSaved])
 
   const handleImportProject = useCallback(async (file: File) => {
@@ -218,7 +219,7 @@ export default function App() {
     }
   }, [dispatch])
 
-  // Loading a .brep replaces the whole project, discarding any unsaved edits — confirm first.
+  // Loading a .tve replaces the whole project, discarding any unsaved edits — confirm first.
   const handleLoadClick = useCallback(() => {
     if (isDirty && !window.confirm('You have unsaved changes that will be lost. Load a different project anyway?')) {
       return
@@ -354,6 +355,20 @@ export default function App() {
     setSelectedObjectIds([])
     setSelectedZoomId(null)
     setSelectedEffectId(effect.id)
+    setDrawingObjectId(null)
+  }, [playback.globalTime, dispatch])
+
+  // Apply an effect preset (spec 26): build its stack at the playhead and add it as ONE undo entry.
+  // Select the first effect so the panel confirms something landed; the rest show on the Effects track.
+  const handleApplyPreset = useCallback((presetId: string) => {
+    const preset = EFFECT_PRESETS.find((p) => p.id === presetId)
+    if (!preset) return
+    const effects = buildPresetEffects(preset, playback.globalTime)
+    if (effects.length === 0) return
+    dispatch({ type: 'ADD_EFFECTS', effects })
+    setSelectedObjectIds([])
+    setSelectedZoomId(null)
+    setSelectedEffectId(effects[0].id)
     setDrawingObjectId(null)
   }, [playback.globalTime, dispatch])
 
@@ -511,6 +526,16 @@ export default function App() {
     setDrawingObjectId(null)
   }, [])
 
+  // Duplicate → drop the copy at the current playhead on a new lane above (reducer), then select it
+  // so the new clip is the one under the cursor/panel — otherwise it lands identical-on-top and reads
+  // as "nothing happened". App owns the new id so it can select the copy the reducer creates.
+  const handleDuplicateObject = useCallback((objectId: string) => {
+    if (!project.objects.some((o) => o.id === objectId)) return
+    const newId = crypto.randomUUID()
+    dispatch({ type: 'DUPLICATE_OBJECT', objectId, newId, startTime: playback.globalTime })
+    handleSelectObject(newId)
+  }, [project.objects, playback.globalTime, dispatch, handleSelectObject])
+
   return (
     <div className="h-screen flex flex-col bg-bg text-fg">
       {/* Top Bar */}
@@ -525,21 +550,21 @@ export default function App() {
           <button
             onClick={handleExportProject}
             className="flex items-center gap-1 px-2 py-1 text-xs text-muted hover:text-fg bg-surface-muted hover:bg-surface-hover rounded transition-colors cursor-pointer"
-            title="Save project as .brep"
+            title="Save project as .tve"
           >
             <IconDeviceFloppy size={14} stroke={2} /> Save
           </button>
           <button
             onClick={handleLoadClick}
             className="flex items-center gap-1 px-2 py-1 text-xs text-muted hover:text-fg bg-surface-muted hover:bg-surface-hover rounded transition-colors cursor-pointer"
-            title="Load project from .brep"
+            title="Load project from .tve"
           >
             <IconFolderOpen size={14} stroke={2} /> Load
           </button>
           <input
             ref={projectFileRef}
             type="file"
-            accept=".brep"
+            accept=".tve"
             className="hidden"
             onChange={(e) => {
               const file = e.target.files?.[0]
@@ -600,6 +625,7 @@ export default function App() {
           onCreateObject={handleCreateObject}
           onCreateZoom={handleCreateZoom}
           onCreateEffect={handleCreateEffect}
+          onApplyPreset={handleApplyPreset}
         />
         <div className="relative flex flex-1 min-w-0">
         <Canvas
@@ -619,6 +645,7 @@ export default function App() {
           onToggleCameraView={toggleCameraView}
           effects={project.effects}
           onToggleDraw={handleToggleDrawSelected}
+          onDuplicate={handleDuplicateObject}
         />
           {/* Floating transport pill (spec 17 C) — centered over the canvas, in the render's bottom
               gutter. The container ignores pointer events; the pill re-enables them so it never
@@ -651,6 +678,7 @@ export default function App() {
           onSeek={playback.seek}
           isDrawing={interactionMode === 'draw'}
           onToggleDraw={handleToggleDrawSelected}
+          onDuplicate={handleDuplicateObject}
         />
       </div>
 

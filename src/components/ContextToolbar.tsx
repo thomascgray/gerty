@@ -8,7 +8,7 @@ import {
   IconCopy, IconTrash, IconVector, IconSparkles, IconBold, IconItalic, IconTypography, IconHighlight,
   IconAlignLeft, IconAlignCenter, IconAlignRight, IconAlignJustified,
   IconArrowNarrowRight, IconAdjustments, IconDroplet, IconVolume, IconVolumeOff,
-  IconFocusCentered, IconClock,
+  IconFocusCentered, IconClock, IconArrowsMaximize,
 } from '@tabler/icons-react'
 import { Popover } from './Popover'
 import { Field, NumberInput, TransitionSection, SELECT_CLS, MotionPicker } from './propertyControls'
@@ -26,11 +26,13 @@ export function ContextToolbar({
   dispatch,
   globalTime,
   onToggleDraw,
+  onDuplicate,
 }: {
   object: TimelineObject
   dispatch: React.Dispatch<ProjectAction>
   globalTime: number
   onToggleDraw?: () => void
+  onDuplicate?: (objectId: string) => void
 }) {
   const obj = object
   const update = (updates: Partial<Omit<TimelineObject, 'id' | 'type'>>) =>
@@ -70,7 +72,7 @@ export function ContextToolbar({
 
       {/* Universal actions */}
       <Divider />
-      <ToolbarButton title="Duplicate" onClick={() => dispatch({ type: 'DUPLICATE_OBJECT', objectId: obj.id })}>
+      <ToolbarButton title="Duplicate" onClick={() => onDuplicate ? onDuplicate(obj.id) : dispatch({ type: 'DUPLICATE_OBJECT', objectId: obj.id })}>
         <IconCopy size={16} stroke={2} />
       </ToolbarButton>
       <ToolbarButton title="Delete" danger onClick={() => dispatch({ type: 'REMOVE_OBJECT', objectId: obj.id })}>
@@ -343,8 +345,20 @@ function MediaControls({
       updates: editPose(obj, { opacity: v }, clipTime),
     })
   const commit = () => dispatch({ type: 'COMMIT_TRANSIENT' })
+  // Fill the frame (object-fit: cover). The box spans the whole frame; drawImageCover crops overflow.
+  // Routed through editPose (like canvas drag/resize) so it lands on the right pose for keyframed clips
+  // and just sets the home pose for a plain asset. Rotation is reset so the fill is axis-aligned.
+  const fillFrame = () =>
+    dispatch({
+      type: 'UPDATE_OBJECT',
+      objectId: obj.id,
+      updates: editPose(obj, { x: 0, y: 0, width: 1, height: 1, rotation: 0 }, clipTime),
+    })
   return (
     <>
+      <ToolbarButton title="Fill frame" onClick={fillFrame}>
+        <IconArrowsMaximize size={16} stroke={2} />
+      </ToolbarButton>
       <Popover icon={<IconDroplet size={16} stroke={2} />} title="Opacity">
         <div className="w-52 p-3">
           <div className="mb-1 flex items-center justify-between">

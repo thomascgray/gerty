@@ -367,6 +367,27 @@ export function drawText(
         ctx.globalAlpha *= 1 - effect.amount * 0.25 * (0.5 - 0.5 * osc)
         break
       }
+      case 'warble': {
+        // Faux-3D axis wobble about the text-box center. Two oscillators 90° out of phase drive a
+        // Y-tilt (θy) and X-tilt (θx), so the "near" edge precesses left→top→right→bottom in a loop.
+        // Perspective is faked with an affine matrix — foreshorten each axis by cos(θ) and add a
+        // matching skew — which reads convincingly for a *slight* wobble without offscreen projection.
+        const cx = bx + bw / 2
+        const cy = by + bh / 2
+        const phase = 2 * Math.PI * effect.speed * time
+        const tilt = effect.amount * 0.3 // max tilt in radians (~17° at amount=1) → "slight"
+        const thy = tilt * Math.sin(phase)
+        const thx = tilt * Math.cos(phase)
+        const K = 0.4 // skew strength that sells the pseudo-perspective
+        ctx.translate(cx, cy)
+        ctx.transform(Math.cos(thy), Math.sin(thy) * K, Math.sin(thx) * K, Math.cos(thx), 0, 0)
+        ctx.translate(-cx, -cy)
+        break
+      }
+      case 'glitch':
+        // Handled after layout in the paint tail (needs multiple full-text passes); no per-glyph
+        // setup here. Falls through to the default fill loop being replaced by drawGlitchText below.
+        break
     }
   }
 
@@ -430,8 +451,94 @@ export function drawText(
   }
 
   ctx.fillStyle = fillStyle
-  for (let p = 0; p < passes; p++) renderLines()
+  if (effect?.kind === 'glitch') {
+    drawGlitchText(ctx, effect, time, scaleFactor, bx, by, bw, bh, fillStyle, renderLines)
+  } else {
+    for (let p = 0; p < passes; p++) renderLines()
+  }
   ctx.restore()
+}
+
+// --- Glitch text effect (spec 19 extension) -------------------------------------------------
+// A deterministic pure fn of clip `time` (like grain/old-film in renderer.ts) so preview and export
+// match frame-for-frame. Small hashInt/mulberry32 are duplicated locally on purpose to keep this
+// module dependency-free.
+
+function hashInt(n: number): number {
+  let t = (n ^ 0x9e3779b9) >>> 0
+  t = Math.imul(t ^ (t >>> 15), 1 | t)
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+  return (t ^ (t >>> 14)) >>> 0
+}
+
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0
+  return () => {
+    a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+const GLITCH_BANDS = 9
+
+/**
+ * Render the text with a glitch look: horizontal bands that tear sideways + drop out, over an RGB
+ * chromatic-aberration split. `time` is quantized to a glitch "tick" so the artifacts step (film-
+ * style) rather than smear, and every random draw is seeded from that tick → reproducible in export.
+ *
+ * Each band clips a vertical slice and redraws the full text translated, so every pixel row is
+ * painted exactly once (no black-fill holes over whatever's behind the text). Per band we draw an
+ * additive red + cyan copy (they sum to white where they overlap, leaving coloured fringes on each
+ * side) and then the real body fill on top.
+ */
+function drawGlitchText(
+  ctx: CanvasRenderingContext2D,
+  effect: Extract<TextEffect, { kind: 'glitch' }>,
+  time: number,
+  scaleFactor: number,
+  bx: number, by: number, bw: number, bh: number,
+  bodyFill: string | CanvasGradient,
+  renderLines: () => void,
+) {
+  const amt = effect.amount
+  const fps = 6 + effect.speed * 8         // glitch update rate; speed scales how frantic it is
+  const rnd = mulberry32(hashInt(Math.floor(time * fps)) || 1)
+
+  const split = (2 + amt * 5) * scaleFactor * (0.7 + 0.6 * rnd()) // chromatic offset, px
+  const sy = (rnd() - 0.5) * amt * 2 * scaleFactor
+  const jx = (rnd() - 0.5) * amt * 3 * scaleFactor               // whole-block jitter
+  const jy = (rnd() - 0.5) * amt * 1.5 * scaleFactor
+
+  const bandH = bh / GLITCH_BANDS
+  const clipX = bx - bw   // generous horizontal clip so torn slices aren't cut early
+  const clipW = bw * 3
+
+  for (let i = 0; i < GLITCH_BANDS; i++) {
+    const r = rnd()
+    if (r < 0.04 * amt) continue                       // dropout: band blanks out ("bits disappear")
+    const torn = rnd() < 0.22 * amt                    // only a few bands slide each tick
+    const offset = torn ? (rnd() - 0.5) * amt * 26 * scaleFactor : 0
+
+    ctx.save()
+    ctx.beginPath()
+    ctx.rect(clipX, by + i * bandH, clipW, bandH + 0.5) // +0.5 avoids hairline seams between bands
+    ctx.clip()
+    ctx.translate(offset + jx, jy)
+
+    ctx.globalCompositeOperation = 'lighter'
+    ctx.fillStyle = '#ff2233'
+    ctx.save(); ctx.translate(split, sy); renderLines(); ctx.restore()
+    ctx.fillStyle = '#22ffff'
+    ctx.save(); ctx.translate(-split, -sy); renderLines(); ctx.restore()
+
+    ctx.globalCompositeOperation = 'source-over'
+    ctx.fillStyle = bodyFill
+    renderLines()
+    ctx.restore()
+  }
+  ctx.globalCompositeOperation = 'source-over'
 }
 
 /** Build a linear-gradient fill across the text box along `effect.angle` (degrees). */

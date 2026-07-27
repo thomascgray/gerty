@@ -1,11 +1,17 @@
 import { useState, type ComponentType } from 'react'
 import type { TimelineObjectType, AssetMeta, VideoEffectKind } from '../types'
 import { getAssetUrl } from '../lib/assetStore'
+import { EFFECT_PRESETS } from '../lib/effectPresets'
 import {
   IconPhoto, IconTypography, IconShape, IconZoomScan,
   IconArrowUpRight, IconScribble, IconPhotoPlus, IconMusic,
   IconChevronLeft, IconChevronRight, IconSparkles,
-  IconContrast, IconDroplet, IconColorSwatch, IconVignette, IconGrain, IconMovie, type IconProps,
+  IconContrast, IconDroplet, IconColorSwatch, IconVignette, IconGrain, IconMovie,
+  IconRainbow, IconContrast2, IconSunHigh, IconFlare, IconAperture, IconGridDots, IconGradienter,
+  IconStack2, IconCircleHalf2, IconArrowsExchange, IconColorPicker, IconGridPattern,
+  IconDeviceTv, IconDeviceTvOld, IconCircles, IconBrush,
+  IconWand, IconSkull, IconSunset2, IconBinoculars, IconVideo, IconMoon,
+  type IconProps,
 } from '@tabler/icons-react'
 
 type TablerIcon = ComponentType<IconProps>
@@ -18,6 +24,20 @@ type LeftRailProps = {
   onCreateObject: (type: TimelineObjectType) => void
   onCreateZoom: () => void
   onCreateEffect: (kind: VideoEffectKind) => void  // spec 23: colour/overlay effects
+  onApplyPreset: (presetId: string) => void        // spec 26: apply a named preset stack
+}
+
+// Per-preset icon (kept here so effectPresets.ts stays free of React imports).
+const PRESET_ICON: Record<string, TablerIcon> = {
+  cinematic: IconVideo,
+  cinematiccool: IconMoon,
+  super8: IconMovie,
+  retrotv: IconDeviceTv,
+  noir: IconContrast,
+  comicbook: IconBrush,
+  grimdark: IconSkull,
+  vaporwave: IconSunset2,
+  nightvision: IconBinoculars,
 }
 
 const SECTIONS: { id: RailSection; label: string; Icon: TablerIcon }[] = [
@@ -32,7 +52,7 @@ const SECTIONS: { id: RailSection; label: string; Icon: TablerIcon }[] = [
  * Subsumes the old header creation clusters and the "+ Asset" trigger, and adds a basic re-addable
  * media library. Collapsible to just the icon rail. Ephemeral view-state (not persisted).
  */
-export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateObject, onCreateZoom, onCreateEffect }: LeftRailProps) {
+export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateObject, onCreateZoom, onCreateEffect, onApplyPreset }: LeftRailProps) {
   const [section, setSection] = useState<RailSection>('media')
   const [open, setOpen] = useState(true)
 
@@ -83,22 +103,31 @@ export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateObjec
 
       {/* Content pane */}
       {open && (
-        <div className="w-52 flex flex-col overflow-y-auto shrink-0">
+        <div className="w-52 flex flex-col min-h-0 shrink-0">
           {section === 'media' && (
-            <MediaSection assets={assets} onAddMedia={onAddMedia} onAddAsset={onAddAsset} />
+            <div className="flex-1 min-h-0 overflow-y-auto">
+              <MediaSection assets={assets} onAddMedia={onAddMedia} onAddAsset={onAddAsset} />
+            </div>
           )}
           {section === 'text' && (
-            <SimpleSection title="Text" items={[
-              { label: 'Add text box', Icon: IconTypography, onClick: () => onCreateObject('text') },
-            ]} />
+            <div className="flex-1 min-h-0 overflow-y-auto">
+              <SimpleSection title="Text" items={[
+                { label: 'Add text box', Icon: IconTypography, onClick: () => onCreateObject('text') },
+              ]} />
+            </div>
           )}
           {section === 'elements' && (
-            <SimpleSection title="Elements" items={[
-              { label: 'Arrow', Icon: IconArrowUpRight, onClick: () => onCreateObject('arrow') },
-              { label: 'Pen', Icon: IconScribble, onClick: () => onCreateObject('freehand') },
-            ]} />
+            <div className="flex-1 min-h-0 overflow-y-auto">
+              <SimpleSection title="Elements" items={[
+                { label: 'Arrow', Icon: IconArrowUpRight, onClick: () => onCreateObject('arrow') },
+                { label: 'Pen', Icon: IconScribble, onClick: () => onCreateObject('freehand') },
+              ]} />
+            </div>
           )}
           {section === 'effects' && (
+            <div className="flex flex-col flex-1 min-h-0">
+            {/* Raw effects: own scroll area, capped to ~half so Presets stay visible below. */}
+            <div className="flex-1 min-h-0 overflow-y-auto">
             <SimpleSection title="Effects" items={[
               { label: 'Camera zoom', Icon: IconZoomScan, onClick: onCreateZoom },
               { label: 'Black & white', Icon: IconContrast, onClick: () => onCreateEffect('grayscale') },
@@ -107,7 +136,35 @@ export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateObjec
               { label: 'Vignette', Icon: IconVignette, onClick: () => onCreateEffect('vignette') },
               { label: 'Film grain', Icon: IconGrain, onClick: () => onCreateEffect('grain') },
               { label: 'Old film', Icon: IconMovie, onClick: () => onCreateEffect('oldfilm') },
+              // spec 24 (first slice)
+              { label: 'Hue shift', Icon: IconRainbow, onClick: () => onCreateEffect('hue') },
+              { label: 'Contrast crush', Icon: IconContrast2, onClick: () => onCreateEffect('contrast') },
+              { label: 'Bleach bypass', Icon: IconSunHigh, onClick: () => onCreateEffect('bleach') },
+              { label: 'Light leak', Icon: IconFlare, onClick: () => onCreateEffect('lightleak') },
+              { label: 'Chromatic split', Icon: IconAperture, onClick: () => onCreateEffect('chromatic') },
+              { label: 'Pixelate', Icon: IconGridDots, onClick: () => onCreateEffect('pixelate') },
+              { label: 'Gradient map', Icon: IconGradienter, onClick: () => onCreateEffect('gradientmap') },
+              { label: 'Posterize', Icon: IconStack2, onClick: () => onCreateEffect('posterize') },
+              { label: 'Duotone', Icon: IconCircleHalf2, onClick: () => onCreateEffect('threshold') },
+              { label: 'Channel swap', Icon: IconArrowsExchange, onClick: () => onCreateEffect('channelswap') },
+              { label: 'Colour isolate', Icon: IconColorPicker, onClick: () => onCreateEffect('colorisolate') },
+              { label: 'Dither', Icon: IconGridPattern, onClick: () => onCreateEffect('dither') },
+              { label: 'CRT', Icon: IconDeviceTv, onClick: () => onCreateEffect('crt') },
+              { label: 'VHS', Icon: IconDeviceTvOld, onClick: () => onCreateEffect('vhs') },
+              { label: 'Halftone', Icon: IconCircles, onClick: () => onCreateEffect('halftone') },
+              { label: 'Comic ink', Icon: IconBrush, onClick: () => onCreateEffect('comic') },
             ]} />
+            </div>
+            {/* Presets: always-visible lower half, own scroll for overflow. */}
+            <div className="flex-1 min-h-0 overflow-y-auto border-t border-border">
+            <SimpleSection title="Presets" items={EFFECT_PRESETS.map((p) => ({
+              label: p.name,
+              Icon: PRESET_ICON[p.id] ?? IconWand,
+              title: p.description,
+              onClick: () => onApplyPreset(p.id),
+            }))} />
+            </div>
+            </div>
           )}
         </div>
       )}
@@ -170,16 +227,17 @@ function AssetThumb({ asset, onClick }: { asset: AssetMeta; onClick: () => void 
 
 function SimpleSection({ title, items }: {
   title: string
-  items: { label: string; Icon: TablerIcon; onClick: () => void }[]
+  items: { label: string; Icon: TablerIcon; onClick: () => void; title?: string }[]
 }) {
   return (
     <div className="p-3">
       <h3 className="text-[10px] font-semibold text-subtle uppercase tracking-wider mb-2 px-1">{title}</h3>
       <div className="flex flex-col gap-1.5">
-        {items.map(({ label, Icon, onClick }) => (
+        {items.map(({ label, Icon, onClick, title: tip }) => (
           <button
             key={label}
             onClick={onClick}
+            title={tip}
             className="flex items-center gap-2.5 w-full px-3 py-2.5 text-sm text-fg bg-surface-muted hover:bg-surface-hover rounded-lg cursor-pointer transition-colors"
           >
             <Icon size={18} stroke={1.8} /> {label}

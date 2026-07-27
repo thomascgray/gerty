@@ -1,6 +1,6 @@
 import { useRef, useCallback, useState, useEffect } from 'react'
 import { createPortal } from 'react-dom'
-import type { TimelineObject, ProjectAction, AudioData, VideoData, CameraZoom, VideoEffect, Marker } from '../types'
+import type { TimelineObject, ProjectAction, AudioData, VideoData, TextData, CameraZoom, VideoEffect, Marker } from '../types'
 import { keyframeColor } from '../lib/keyframes'
 import { zoomEnvelope } from '../lib/camera'
 import { effectEnvelope } from '../lib/effects'
@@ -60,6 +60,22 @@ const EFFECT_BAR_LABEL: Record<VideoEffect['kind'], string> = {
   vignette: 'Vignette',
   grain: 'Grain',
   oldfilm: 'Old Film',
+  hue: 'Hue',
+  contrast: 'Contrast',
+  bleach: 'Bleach',
+  lightleak: 'Light Leak',
+  chromatic: 'Chromatic',
+  pixelate: 'Pixelate',
+  gradientmap: 'Gradient Map',
+  posterize: 'Posterize',
+  threshold: 'Duotone',
+  channelswap: 'Channel Swap',
+  colorisolate: 'Colour Isolate',
+  dither: 'Dither',
+  crt: 'CRT',
+  vhs: 'VHS',
+  halftone: 'Halftone',
+  comic: 'Comic Ink',
 }
 
 /**
@@ -69,10 +85,14 @@ const EFFECT_BAR_LABEL: Record<VideoEffect['kind'], string> = {
  * still stacks all active effects regardless of row.
  */
 function layoutEffectRows(effects: VideoEffect[]): { rows: Map<string, number>; count: number } {
-  const sorted = [...effects].sort((a, b) => a.startTime - b.startTime)
+  // Pack in CREATION order (array order), NOT sorted by startTime. First-fit still guarantees no two
+  // bars share a row while overlapping (a bar only takes a row whose last placement ended before it
+  // starts). Sorting by start would re-rank rows when you drag one bar past another in time — the bar
+  // would jump lanes on release, which reads as "the effect moved to a different track". Creation
+  // order makes an effect's row depend only on effects created before it, so dragging is stable.
   const rowEnds: number[] = [] // end time of the last bar placed in each row
   const rows = new Map<string, number>()
-  for (const e of sorted) {
+  for (const e of effects) {
     const start = e.startTime
     const end = e.startTime + effectEnvelope(e)
     let r = rowEnds.findIndex((endT) => endT <= start + 1e-6)
@@ -81,6 +101,16 @@ function layoutEffectRows(effects: VideoEffect[]): { rows: Map<string, number>; 
     rows.set(e.id, r)
   }
   return { rows, count: Math.max(1, rowEnds.length) }
+}
+
+/** Bar label: text clips preview their actual content (newlines/runs collapsed to a single line, the
+ *  bar's `truncate` clips overflow) rather than the generic object name; everything else uses `name`. */
+function barLabel(obj: TimelineObject): string {
+  if (obj.type === 'text') {
+    const content = (obj.data as TextData).content?.replace(/\s+/g, ' ').trim()
+    if (content) return content
+  }
+  return obj.name
 }
 
 const formatTime = (seconds: number): string => {
@@ -518,8 +548,13 @@ export default function Timeline({
           const zoom = (zooms ?? []).find((z) => z.id === dragState.zoomId)
           if (zoom) onSeek(zoom.startTime + zoom.transitionIn + dragState.originalTime)
         }
+      } else if (dragState.kind === 'move') {
+        dispatch({ type: 'COMMIT_TRANSIENT' })
+        // A press with no real movement is a click, not a drag: collapse a multi-selection down to
+        // just the grabbed clip (pick one out of the group). A real drag keeps the whole selection.
+        const moved = Math.abs(e.clientX - dragState.startMouseX) >= 3 || Math.abs(e.clientY - dragState.startMouseY) >= 3
+        if (!moved) onSelectObject(dragState.objectId)
       } else if (
-        dragState.kind === 'move' ||
         dragState.kind === 'trim-left' || dragState.kind === 'trim-right' ||
         dragState.kind === 'zoom-move' || dragState.kind === 'zoom-resize-right' || dragState.kind === 'zoom-resize-left' ||
         dragState.kind === 'effect-move' || dragState.kind === 'effect-resize-right' || dragState.kind === 'effect-resize-left'
@@ -527,6 +562,7 @@ export default function Timeline({
         dispatch({ type: 'COMMIT_TRANSIENT' })
       }
       setSnapLineTime(null)
+      frozenEffectLayoutRef.current = null // release the pinned effect layout so rows re-pack to final
       setDragState(null)
     }
 
@@ -536,7 +572,7 @@ export default function Timeline({
       window.removeEventListener('mousemove', handleMouseMove)
       window.removeEventListener('mouseup', handleMouseUp)
     }
-  }, [dragState, pixelsPerSecond, dispatch, onSeek, minLane, maxLane, objects, zooms, effects, markers, buildSnapCandidates])
+  }, [dragState, pixelsPerSecond, dispatch, onSeek, onSelectObject, minLane, maxLane, objects, zooms, effects, markers, buildSnapCandidates])
 
   // Render ruler ticks
   const ticks: { time: number; label: string; major: boolean }[] = []
@@ -556,7 +592,11 @@ export default function Timeline({
 
   // Effect display rows (spec 23): overlapping effects stack so both stay visible + grabbable. The
   // Effects track grows to fit the row count; its gutter label matches so the columns stay aligned.
-  const { rows: effectRowMap, count: effectRowCount } = layoutEffectRows(effects ?? [])
+  // The layout is greedy over startTime, so it would RESHUFFLE mid-drag as a bar's start changes —
+  // making the grabbed bar jump rows (reads as "the selection jumped to another effect"). While an
+  // effect drag is active we hold the pre-drag layout frozen, then recompute on release.
+  const frozenEffectLayoutRef = useRef<{ rows: Map<string, number>; count: number } | null>(null)
+  const { rows: effectRowMap, count: effectRowCount } = frozenEffectLayoutRef.current ?? layoutEffectRows(effects ?? [])
   const effectsTrackHeight = effectRowCount * EFFECT_ROW_HEIGHT
 
   // Helper: visual Y position for a lane number
@@ -905,6 +945,7 @@ export default function Timeline({
                       onMouseDown={(e) => {
                         e.stopPropagation()
                         onSelectEffect(effect.id)
+                        frozenEffectLayoutRef.current = layoutEffectRows(effects ?? [])
                         setDragState({ kind: 'effect-resize-left', effectId: effect.id, startMouseX: e.clientX, originalStartTime: effect.startTime, originalHold: effect.hold })
                       }}
                     />
@@ -915,12 +956,15 @@ export default function Timeline({
                       style={{
                         backgroundColor: EFFECT_COLOR,
                         opacity: effect.hidden ? 0.35 : isSelected ? 1 : 0.72,
-                        outline: isSelected ? '2px solid white' : effect.hidden ? '1px dashed rgba(255,255,255,0.7)' : 'none',
+                        outline: isSelected ? '2px solid #fff' : effect.hidden ? '1px dashed rgba(255,255,255,0.7)' : 'none',
                         outlineOffset: -1,
+                        boxShadow: isSelected ? '0 0 0 2px #0ea5e9, 0 0 12px 2px rgba(14,165,233,0.6)' : undefined,
+                        zIndex: isSelected ? 30 : undefined,
                       }}
                       onMouseDown={(e) => {
                         e.stopPropagation()
                         onSelectEffect(effect.id)
+                        frozenEffectLayoutRef.current = layoutEffectRows(effects ?? [])
                         setDragState({ kind: 'effect-move', effectId: effect.id, startMouseX: e.clientX, originalStartTime: effect.startTime })
                       }}
                     >
@@ -950,6 +994,7 @@ export default function Timeline({
                       onMouseDown={(e) => {
                         e.stopPropagation()
                         onSelectEffect(effect.id)
+                        frozenEffectLayoutRef.current = layoutEffectRows(effects ?? [])
                         setDragState({ kind: 'effect-resize-right', effectId: effect.id, startMouseX: e.clientX, originalHold: effect.hold })
                       }}
                     />
@@ -1029,6 +1074,9 @@ export default function Timeline({
                       top,
                       width,
                       height: LANE_HEIGHT,
+                      // Lift the WHOLE selected clip above neighbors here (not on the bar body), so the
+                      // bar doesn't stack over its own keyframe diamonds and hide them.
+                      zIndex: isSelected ? 30 : undefined,
                     }}
                   >
                     {/* Trim ghosts (spec 14 R8 feedback): dimmed, draggable stubs of trimmed-off
@@ -1106,8 +1154,12 @@ export default function Timeline({
                         backgroundColor: color,
                         // Hidden clips (spec 14 R11) render dimmed + dashed so the state reads at a glance.
                         opacity: obj.hidden ? 0.4 : isSelected ? 1 : 0.75,
-                        outline: isSelected ? '2px solid white' : obj.hidden ? '1px dashed rgba(255,255,255,0.6)' : 'none',
+                        outline: isSelected ? '2px solid #fff' : obj.hidden ? '1px dashed rgba(255,255,255,0.6)' : 'none',
                         outlineOffset: -1,
+                        // Selected bars get a bright sky ring + glow so a multi-selection is
+                        // unmistakable across lanes. (The lift above neighbors lives on the outer
+                        // container so the bar never stacks over its own keyframe diamonds.)
+                        boxShadow: isSelected ? '0 0 0 2px #0ea5e9, 0 0 12px 2px rgba(14,165,233,0.6)' : undefined,
                       }}
                       onMouseDown={(e) => {
                         e.stopPropagation()
@@ -1127,6 +1179,14 @@ export default function Timeline({
                           .filter((o): o is TimelineObject => !!o)
                           .map((o) => ({ objectId: o.id, originalStartTime: o.startTime, originalLane: o.lane }))
                         const groupLanes = group.map((g) => g.originalLane)
+                        // You can always drag onto ONE new lane just past the objects you're NOT
+                        // dragging (top or bottom), so a fresh top/bottom layer is always reachable —
+                        // even after the previous top object moved down. Union with the current visible
+                        // extent [minLane, maxLane] so explicitly-added lanes stay reachable too.
+                        const groupSet = new Set(groupIds)
+                        const otherLanes = objects.filter((o) => !groupSet.has(o.id)).map((o) => o.lane)
+                        const laneFloor = otherLanes.length ? Math.min(minLane, Math.min(...otherLanes) - 1) : minLane
+                        const laneCeil = otherLanes.length ? Math.max(maxLane, Math.max(...otherLanes) + 1) : maxLane
                         setDragState({
                           kind: 'move',
                           objectId: obj.id,
@@ -1135,9 +1195,9 @@ export default function Timeline({
                           originalStartTime: obj.startTime,
                           group,
                           minGroupStart: Math.min(...group.map((g) => g.originalStartTime)),
-                          // Bound the shared lane delta so no member leaves [minLane, maxLane].
-                          clampMinLaneDelta: minLane - Math.min(...groupLanes),
-                          clampMaxLaneDelta: maxLane - Math.max(...groupLanes),
+                          // Bound the shared lane delta so no member leaves [laneFloor, laneCeil].
+                          clampMinLaneDelta: laneFloor - Math.min(...groupLanes),
+                          clampMaxLaneDelta: laneCeil - Math.max(...groupLanes),
                         })
                       }}
                     >
@@ -1173,7 +1233,7 @@ export default function Timeline({
                       })()}
 
                       <span className="relative text-[10px] text-white px-1 truncate leading-10 pointer-events-none">
-                        <span className="font-bold">{obj.name}</span>
+                        <span className="font-bold">{barLabel(obj)}</span>
                         {' '}
                         <span className="opacity-70">[{formatTime(obj.startTime)} - {formatTime(obj.startTime + obj.duration)}]</span>
                       </span>

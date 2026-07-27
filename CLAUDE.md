@@ -9,7 +9,7 @@ A browser-based video editor: **React 19 + TypeScript + Canvas 2D + WebCodecs**,
 - **Verify with `npx tsc -b`** (the build is `tsc -b && vite build`). Keep it green — there is no other typecheck gate.
 - **Do NOT run the dev server or browser automation.** The user always has `npm run dev` running and tests changes in the browser themselves. After a change, run static checks and hand the user a short "click X, look for Y" checklist. (See `.claude/skills/verify/SKILL.md`.)
 - `src/config.ts` → `persistProject` (default **false**): when false the app boots to an empty default project and does **not** load/save localStorage. Flip to true to persist across refreshes.
-- Specs live in `SPECS/`, implementation logs in `TASKS/`. Spec 12 (animation) and 13 (camera zoom) are **done**; 09 (video perf), 14 (video trim), 15 (audio) are planned; 10 (build fixes) done; 11 (audio pitch) planned.
+- Specs live in `SPECS/`, implementation logs in `TASKS/`. Done: 10 (build fixes), 12 (animation), 13 (camera zoom), 14 (video trim/split), 22 (markers), 23 (video effects). Planned: 09 (video perf), 11 (audio pitch), 15 (audio).
 
 ## The data model (`src/types.ts`)
 
@@ -35,9 +35,9 @@ type TimelineObject = {
 ```
 
 - **Coordinates are normalized 0–1**, multiplied by the canvas `width`/`height` (project dims, default 1920×1080) at draw time. This is why a camera/zoom (spec 13) is just one `ctx` transform, and why hit-testing on a non-square canvas converts to pixel space (`Canvas.tsx`).
-- `data` variants: `PhotoData{assetId}`, `ArrowData{points[],headSize,curvature,progressiveHead}`, `TextData{content,background?,padding?}`, `ShapeData` (empty — rect/circle), `FreehandData{strokes[][]}`, `AudioData{assetId,volume,originalDuration,waveform?}`, `VideoData{assetId,volume,originalDuration}`.
-- **No trim yet**: for audio/video, shortening `duration` **speeds the clip up** (`rate = originalDuration/duration`, clamped 0.25–4). `sourceIn`/`sourceOut` trim is planned in spec 14. This is a real model gap, not a bug.
-- `Project = {id,name,fps,width,height,objects[],assets[], zooms?}`. `AssetMeta = {id,type,filename,mimeType,size,duration?}`. `zooms?: CameraZoom[]` is the camera track (spec 13) — optional/additive, persists via the same whole-project JSON.
+- `data` variants: `PhotoData{assetId}`, `ArrowData{points[],headSize,curvature,progressiveHead}`, `TextData{content,background?,padding?}`, `ShapeData` (empty — rect/circle), `FreehandData{strokes[][]}`, `AudioData`/`VideoData{assetId,volume,muted?,originalDuration,waveform?,sourceIn?,sourceOut?,sourceMin?,sourceMax?}`.
+- **Trim vs speed (spec 14, done)**: audio/video separate **trim** (`sourceIn`/`sourceOut` — which source span plays) from **speed** (`rate = span/duration`). All mapping is centralized in `src/lib/mediaTiming.ts` (`srcIn/srcOut/sourceSpan/clipRate/sourceTimeAt`, plus the recoverable-window `srcMin/srcMax`). Defaults (`sourceIn=0, sourceOut=originalDuration`) reproduce the old speed-stretch behaviour. See **Timeline lanes & selection** for the trim-ghost / split-window model.
+- `Project = {id,name,fps,width,height,objects[],assets[], zooms?, markers?, effects?}`. `AssetMeta = {id,type,filename,mimeType,size,duration?}`. `zooms?` (camera, spec 13), `markers?` (spec 22), `effects?` (spec 23) are all optional/additive and persist via the same whole-project JSON.
 - **`CameraZoom` is NOT a `TimelineObject`** — no `lane`/`data`/`keyframes`. It's `{id, x, y, scale, startTime, transitionIn, hold, transitionOut, easing}` (see Camera below). Selected via a **separate `selectedZoomId`** in `App.tsx`, mutually exclusive with `selectedObjectId`.
 - Factories: `createDefaultProject()`, `createTimelineObject(type, data, options)`, `createCameraZoom(options?)` (defaults: `scale 2`, `transitionIn 0.6`, `hold 2`, `transitionOut 0.6`, `easeInOutCubic`).
 
@@ -48,6 +48,20 @@ A reducer over `{past[], present, future[], transientSnapshot}` (undo stack capp
 - `UPDATE_OBJECT_TRANSIENT` → `COMMIT_TRANSIENT` — the pattern for a continuous gesture (drag): transient updates don't grow history; commit collapses the whole gesture into **one** undo entry. Used by canvas drag/resize and timeline bar drags.
 - `ADD_OBJECTS`, `REMOVE_OBJECT`, `DUPLICATE_OBJECT` (deep-clones `data`+`keyframes` so copies are independent), `ADD_ASSETS`, `REMOVE_LANE`, `SET_PROJECT`, `SET_NAME`, `UNDO`/`REDO`.
 - Camera zooms (spec 13): `ADD_ZOOM`, `UPDATE_ZOOM`, `UPDATE_ZOOM_TRANSIENT` (→ reuse `COMMIT_TRANSIENT`), `REMOVE_ZOOM` — mirror the object CRUD + transient/commit pattern (one undo per drag gesture).
+- Media split (spec 14): `SPLIT_OBJECT` slices an audio/video clip at the playhead into two independent halves (deep-cloned data/keyframes). Markers (spec 22): `ADD_MARKER`/`UPDATE_MARKER(_TRANSIENT)`/`REMOVE_MARKER`/`CLEAR_MARKERS`. Effects (spec 23): `ADD_EFFECT`/`UPDATE_EFFECT(_TRANSIENT)`/`REMOVE_EFFECT` — same CRUD + transient/commit shape as zooms.
+
+## Timeline lanes & selection (`Timeline.tsx`, `App.tsx`)
+
+**Lanes are a sparse integer z-order, not an array index.** `obj.lane` — higher renders on top (the renderer sorts by `lane`). Lanes are **never compacted**: dropping a clip on a "new" lane just writes a different integer, and gaps between lane numbers are fine. The **visible lane range is derived each render** — `objMinLane`/`objMaxLane` from the objects, unioned with the ephemeral `addedTopLane`/`addedBottomLane` (the ± lane CTAs; pure view state, not persisted, not undo).
+
+- **Lane-drag reach rule**: a move-drag can always push a clip **one lane past the top/bottom of the clips it is NOT dragging** (unioned with the current visible extent). So a fresh top/bottom layer is *always* reachable — even after the former top clip moved down — but it's bounded to +1 so you never spawn infinite empty lanes. The clamp is captured at drag start from the non-dragged objects, so it's stable through the gesture.
+
+**Multi-selection**: `selectedObjectIds: string[]` in `App.tsx` is the **source of truth**; `selectedObjectId` (the single "primary" that drives the `PropertiesPanel` + `Canvas` overlay) is **derived** = the one id *only when exactly one* is selected. A multi-selection intentionally shows **no panel and no canvas box** — it's a timeline bulk-move tool. `selectedObjectId`/`selectedZoomId`/`selectedEffectId` remain **mutually exclusive** (selecting one clears the others in `App.tsx`).
+
+- **Gestures** (timeline bar body): **shift-click** toggles a clip in/out of the set (no drag starts); **plain-drag** a clip already in the set moves the **whole group**; grabbing any *other* clip collapses to just it; a plain **click** (moved < 3px) on a group member collapses the selection to that one clip.
+- **Group move** = one `UPDATE_OBJECT_TRANSIENT` **per member** each mousemove, then a single `COMMIT_TRANSIENT` → **one undo** (the transient snapshot is captured once, on the first dispatch of the gesture). The shared time delta is **floored so the earliest member can't cross 0** (relative spacing preserved); the shared lane delta is clamped to the group's collective extent. Snapping is driven by the grabbed clip and **excludes the whole moving group** so members don't snap to each other. **Delete** removes every clip in the selection (one `REMOVE_OBJECT` per id).
+
+**Trim ghosts & split** (audio/video, spec 14): the timeline bar draws dimmed **trim "ghosts"** on each end for *recoverable* trimmed-off source you can drag back out. A clip's recoverable window is `[sourceMin, sourceMax]` (default `[0, originalDuration]`). **Splitting (`S`) collapses each half's window to its own played span** (`sourceMin=sourceIn`, `sourceMax=sourceOut`), so the halves read as fresh **untrimmed** clips — no ghosts, and neither edge can be dragged back out over the sibling. (This is why split halves no longer overlap and steal each other's clicks.)
 
 ## Rendering pipeline
 
@@ -106,10 +120,19 @@ A project-level list of discrete **`CameraZoom`s** (`Project.zooms?`) compiles i
 - **Timeline Camera track** (`Timeline.tsx`): a **pinned** track (its own row under the ruler, ⛶ gutter label) rendering `project.zooms` as amber envelope bars (ease-in/out shown as end ramps, hold = solid middle). Drag body = retime `startTime`; drag edges = adjust `hold` anchored at the opposite edge; click = select. Adjacent bars make A→B chaining visible. All transient→commit.
 - **Selection invariant**: `selectedObjectId` and `selectedZoomId` are mutually exclusive — selecting one clears the other (enforced in `App.tsx`). `PropertiesPanel` renders the `ZoomEditor` instead of the object editor when a zoom is selected.
 
+## Video effects (spec 23 — render-wide colour/overlay post-process)
+
+A project-level list of **`VideoEffect`s** (`Project.effects?`) resolved by `src/lib/effects.ts` into the effect stack active at a time, then applied as a **full-frame post-process AFTER the object loop** inside the shared `renderFrame` — so preview and export match by construction. Mirrors the camera's architecture, but effects **do NOT chain / hand off** — each resolves its own eased intensity from its envelope and they simply stack. No active effects ⇒ the whole block is skipped ⇒ output is pixel-identical to pre-spec-23.
+
+- **Model (`types.ts`)**: `VideoEffect = {id, kind, intensity (0–1 peak), startTime, transitionIn, hold, transitionOut, easing, vignette?, oldfilm?, hidden?}`. `kind ∈ grayscale|sepia|invert|vignette|grain|oldfilm`. The **envelope shape is identical to a zoom** (`effectEnvelope = in+hold+out`), but the eased quantity is the **intensity** (0→peak→0), so the ease-in *is* the fade-in. Per-kind payload mirrors `{type,data}`: `vignette` → `VignetteParams{shape,size,feather}`, `oldfilm` → `OldFilmParams{wobble}` (frame-weave, **decoupled from intensity**).
+- **Resolver**: `resolveEffects(effects, globalTime): ResolvedEffect[]` — skips hidden, drops intensity ≤ 0, orders by **`startTime` then `id`** (deterministic compose order). The renderer splits the survivors: colour kinds → one `ctx.filter` string (`effectsToFilterString`, applied via a self-composited redraw); overlay kinds (vignette/grain/oldfilm) drawn on top with the filter reset. **Grain and old-film are time-animated** — their per-frame jitter is derived **deterministically from `globalTime`, never `Math.random`** — so preview and export are identical and frame-reproducible.
+- **Actions / selection**: `ADD_EFFECT` / `UPDATE_EFFECT` / `UPDATE_EFFECT_TRANSIENT` / `REMOVE_EFFECT` (mirror zoom CRUD). `selectedEffectId` in `App.tsx`, mutually exclusive with object/zoom selection; `PropertiesPanel` shows the effect editor when one is selected. Created from the **Animations** cluster in `AnnotationTools.tsx`.
+- **Effects track** (`Timeline.tsx`): a **pinned** track below the Camera track, rendering `project.effects` as amber envelope bars stacked into **display rows** so overlapping effects stay visible + grabbable. **Row-layout rule**: `layoutEffectRows` packs greedily in **creation (array) order — NOT sorted by `startTime`** — so an effect's row is stable and it never "jumps lanes" when dragged past another in time (first-fit still guarantees no two overlapping bars share a row). The layout is additionally **frozen for the duration of any effect drag** (captured on mousedown, released on mouseup) so rows don't reshuffle mid-gesture — they re-pack only on release.
+
 ## Playback, audio, media (`src/hooks/`)
 
 - **`usePlayback`** — owns `globalTime` (state, advanced by rAF while playing), `isPlaying`, `totalDuration`, `play/pause/togglePlayback/seek`.
-- **`useAudioPlayback`** — one `HTMLVideoElement`/`HTMLAudioElement` per audio/video object; syncs `currentTime` to `globalTime`, sets `playbackRate = originalDuration/duration` (0.25–4), applies `volume`, handles mute. Preview audio preserves pitch (media element default); export does not (spec 11). Registers video elements in `mediaRegistry` so the canvas can blit them.
+- **`useAudioPlayback`** — one `HTMLVideoElement`/`HTMLAudioElement` per audio/video object; syncs `currentTime` to `sourceTimeAt(...)`, sets `playbackRate = clipRate(data, duration)` (= `span/duration`, clamped; see `mediaTiming.ts`), applies `volume`, handles mute. Preview audio preserves pitch (media element default); export does not (spec 11). Registers video elements in `mediaRegistry` so the canvas can blit them.
 - **`mediaRegistry.ts`** — module-level `Map<objectId, HTMLVideoElement>`; written by `useAudioPlayback`, read by `useCanvasRenderer`. One decoded element per video object.
 - **`assetStore.ts`** — asset blobs in IndexedDB; `getAssetUrl/getAssetBlob`, `getMediaDuration`, `generateWaveform` (200 mono max-peaks, audio only today; video has no waveform field yet). Size warnings (`SIZE_WARN_*`).
 
@@ -127,9 +150,11 @@ Tiered: **WebCodecs `VideoEncoder` + `mp4-muxer`** (primary, main thread) → **
 | Compositor | `src/lib/renderer.ts` (shared preview+export) |
 | Animation core | `src/lib/keyframes.ts` (poses/keyframes/transitions), `src/lib/easing.ts` |
 | Camera / zooms | `src/lib/camera.ts` (`resolveCamera` + rect helpers); zoom UI in `Canvas.tsx` (framing rect/scrim + Live toggle), `Timeline.tsx` (Camera track), `PropertiesPanel.tsx` (`ZoomEditor`), `AnnotationTools.tsx` (`+ Zoom`) |
+| Video effects | `src/lib/effects.ts` (`resolveEffects`); overlays (vignette/grain/oldfilm) drawn in `renderer.ts`; UI in `Timeline.tsx` (Effects track), `PropertiesPanel.tsx` (effect editor), `AnnotationTools.tsx` |
+| Lanes / selection | `Timeline.tsx` (lane range, multi-select gestures, group move, trim/split bars), `App.tsx` (`selectedObjectIds` + derived `selectedObjectId`) |
 | Drawing | `src/lib/annotations.ts` (arrow/text/shape/freehand + bezier math) |
-| Media/assets | `src/lib/assetStore.ts`, `mediaRegistry.ts` |
-| Persistence | `src/lib/projectStorage.ts` (localStorage + `.brep` zip export/import) |
+| Media/assets | `src/lib/assetStore.ts`, `mediaRegistry.ts`, `src/lib/mediaTiming.ts` (trim/speed/window mapping) |
+| Persistence | `src/lib/projectStorage.ts` (localStorage + `.tve` zip export/import) |
 | Export | `src/lib/ffmpegExport.ts`, `videoDecoder.ts`, `exportWorker.ts`, `exportWorkerTypes.ts` |
 | UI | `App.tsx`, `Canvas.tsx` (viewport+overlay), `Timeline.tsx`, `PropertiesPanel.tsx`, `AnnotationTools.tsx`, `ImportModal.tsx`, `ExportModal.tsx` |
 
@@ -137,7 +162,9 @@ Tiered: **WebCodecs `VideoEncoder` + `mp4-muxer`** (primary, main thread) → **
 
 - **60Hz re-render**: `globalTime` is React state, so playback re-renders `App`→`Canvas`→`Timeline`→`PropertiesPanel` every frame. Fine for now; spec 09 A3 addresses it for video-heavy projects.
 - **No DPR handling**; canvas backing store = raw project dims.
-- **Trim = speed** for audio/video (see data model). Spec 14 fixes it.
+- **Lanes never compact & a new top/bottom lane is always +1 reachable** — the lane-drag clamp is intentionally relative to the clips you're *not* dragging (see Timeline lanes & selection), not the current extent, so you can always promote/demote a clip past the others.
+- **A split clip is deliberately "untrimmed"** — its `sourceMin/sourceMax` window is collapsed to its span so no recoverable ghost overlaps the sibling. Editing trim afterward can re-open ghosts *within that window* only.
+- **Effect track rows pack in creation order, not by `startTime`** (and freeze during a drag) — otherwise a dragged effect bar re-ranks and appears to jump to another track. Display-only; the renderer stacks all active effects regardless of row.
 - **Export runs on the main thread** → UI freezes during export; not cancellable. Spec 09 B4/B8.
 - **Overlay must mirror render transforms** — the selection overlay is a separate canvas. Spec 13's camera **avoids** needing an inverse transform in v1 by only editing objects in the un-zoomed **Frame view** (Live view disables editing). If object editing while zoomed is ever added, the overlay/hit-testing will need the inverse camera transform.
 - **Camera export is wired but main-thread** — all three export paths (`ffmpegExport.ts` WebCodecs + MediaRecorder, plus `exportWorker.ts`) pass `resolveCamera(project.zooms, t)` per frame, so exports show the same push-ins as Live view.

@@ -85,7 +85,7 @@ type UndoableState = {
 }
 
 function projectReducer(state: UndoableState, action: ProjectAction): UndoableState {
-  // Clears the unsaved-changes flag after a .brep export — no history mutation.
+  // Clears the unsaved-changes flag after a .tve export — no history mutation.
   if (action.type === 'MARK_SAVED') {
     return state.dirty ? { ...state, dirty: false } : state
   }
@@ -237,6 +237,9 @@ function applyAction(project: Project, action: ProjectAction): Project {
     case 'ADD_EFFECT':
       return { ...project, effects: [...(project.effects ?? []), action.effect] }
 
+    case 'ADD_EFFECTS':
+      return { ...project, effects: [...(project.effects ?? []), ...action.effects] }
+
     case 'UPDATE_EFFECT':
       return {
         ...project,
@@ -278,11 +281,17 @@ function applyAction(project: Project, action: ProjectAction): Project {
       const idx = project.objects.findIndex((o) => o.id === action.objectId)
       if (idx === -1) return project
       const original = project.objects[idx]
+      // The copy lands at the playhead (action.startTime) on a NEW lane above everything, so it
+      // shows up at the current time instead of tucked in after the original (where it was easy to
+      // miss). Falls back to the old after-the-original placement / a fresh id if the caller omits
+      // them. Lane = one above the current top so it stacks on top and is immediately visible.
+      const topLane = project.objects.reduce((m, o) => Math.max(m, o.lane), original.lane)
       const dupe = {
         ...original,
-        id: crypto.randomUUID(),
+        id: action.newId ?? crypto.randomUUID(),
         name: original.name + ' (copy)',
-        startTime: original.startTime + original.duration,
+        startTime: action.startTime ?? original.startTime + original.duration,
+        lane: topLane + 1,
         // Deep-clone nested structures so the copy is fully independent (R10) — a shallow
         // spread would share keyframe/data arrays by reference between original and copy.
         data: structuredClone(original.data),
@@ -352,7 +361,7 @@ export function useProject() {
   }, [state.present])
 
   // Remember the canvas size for the next new project (spec 18-qol R3). This preference persists
-  // independently of `config.persistProject`, undo/redo, and `.brep` export — mirrors `useUiPrefs`.
+  // independently of `config.persistProject`, undo/redo, and `.tve` export — mirrors `useUiPrefs`.
   useEffect(() => {
     saveCanvasSize({ width: state.present.width, height: state.present.height })
   }, [state.present.width, state.present.height])

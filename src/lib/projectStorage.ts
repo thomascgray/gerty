@@ -35,7 +35,7 @@ export function clearProject(): void {
 }
 
 /**
- * Export project as a .brep file (ZIP archive containing project.json + assets/).
+ * Export project as a .tve file (ZIP archive containing project.json + assets/).
  */
 export async function exportProjectBrep(project: Project): Promise<void> {
   const zip = new JSZip()
@@ -58,19 +58,19 @@ export async function exportProjectBrep(project: Project): Promise<void> {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `${project.name.replace(/\s+/g, '-').toLowerCase()}.brep`
+  a.download = `${project.name.replace(/\s+/g, '-').toLowerCase()}.tve`
   a.click()
   URL.revokeObjectURL(url)
 }
 
 /**
- * Import a .brep file. Extracts assets into IndexedDB and returns the project.
+ * Import a .tve file. Extracts assets into IndexedDB and returns the project.
  */
 export async function importProjectBrep(file: File): Promise<Project> {
   const zip = await JSZip.loadAsync(file)
 
   const projectJson = zip.file('project.json')
-  if (!projectJson) throw new Error('Invalid .brep file: missing project.json')
+  if (!projectJson) throw new Error('Invalid .tve file: missing project.json')
 
   const projectText = await projectJson.async('text')
   const project = JSON.parse(projectText) as Project

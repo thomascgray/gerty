@@ -7,6 +7,7 @@ import {
 import type {
   TimelineObject, ProjectAction, ArrowData, AudioData, VideoData, TextData, TextAlign,
   AnimatableProperty, EasingKind, CameraZoom, VideoEffect, VideoEffectKind, VignetteShape,
+  GradientMapPreset, ChannelSwapMapping,
 } from '../types'
 import {
   KF_EPS, effVal as kfEffVal, editPose, addKeyframeAt, keyframeColor,
@@ -32,9 +33,11 @@ type PropertiesPanelProps = {
   // Arrow/freehand point editing ("Edit points", spec 17 M). onToggleDraw enters/exits drawing.
   isDrawing?: boolean
   onToggleDraw?: () => void
+  // Duplicate routes through App so the copy lands at the playhead on a new lane + gets selected.
+  onDuplicate?: (objectId: string) => void
 }
 
-export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, globalTime, onSeek, isDrawing, onToggleDraw }: PropertiesPanelProps) {
+export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, globalTime, onSeek, isDrawing, onToggleDraw, onDuplicate }: PropertiesPanelProps) {
   // A selected zoom or effect takes over the panel (all three selections are mutually exclusive).
   if (zoom) {
     return <ZoomEditor zoom={zoom} dispatch={dispatch} globalTime={globalTime} onSeek={onSeek} />
@@ -603,7 +606,7 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
       {/* Actions */}
       <div className="mt-4 space-y-2">
         <button
-          onClick={() => dispatch({ type: 'DUPLICATE_OBJECT', objectId: obj.id })}
+          onClick={() => onDuplicate ? onDuplicate(obj.id) : dispatch({ type: 'DUPLICATE_OBJECT', objectId: obj.id })}
           className="w-full px-3 py-1.5 text-xs bg-surface-muted hover:bg-surface-hover rounded transition-colors cursor-pointer"
         >
           Duplicate
@@ -818,9 +821,50 @@ const EFFECT_LABEL: Record<VideoEffectKind, string> = {
   vignette: 'Vignette',
   grain: 'Film Grain',
   oldfilm: 'Old Film',
+  hue: 'Hue Shift',
+  contrast: 'Contrast Crush',
+  bleach: 'Bleach Bypass',
+  lightleak: 'Light Leak',
+  chromatic: 'Chromatic Split',
+  pixelate: 'Pixelate',
+  gradientmap: 'Gradient Map',
+  posterize: 'Posterize',
+  threshold: 'Duotone',
+  channelswap: 'Channel Swap',
+  colorisolate: 'Colour Isolate',
+  dither: 'Dither',
+  crt: 'CRT',
+  vhs: 'VHS',
+  halftone: 'Halftone',
+  comic: 'Comic Ink',
 }
 
 const EFFECT_COLOR = '#d946ef' // fuchsia — distinct from the violet video bars + amber camera zoom
+
+// Colour Isolate stores a hue (0–360°) but is edited as a colour swatch. These convert between a
+// fully-saturated hue and a hex so the native <input type="color"> shows/sets a pure-hue colour.
+function hueToHex(h: number): string {
+  const hp = ((((h % 360) + 360) % 360)) / 60
+  const x = 1 - Math.abs((hp % 2) - 1)
+  let r = 0, g = 0, b = 0
+  if (hp < 1) { r = 1; g = x } else if (hp < 2) { r = x; g = 1 }
+  else if (hp < 3) { g = 1; b = x } else if (hp < 4) { g = x; b = 1 }
+  else if (hp < 5) { r = x; b = 1 } else { r = 1; b = x }
+  const to = (v: number) => Math.round(v * 255).toString(16).padStart(2, '0')
+  return `#${to(r)}${to(g)}${to(b)}`
+}
+function hexToHue(hex: string): number {
+  let s = hex.replace('#', '')
+  if (s.length === 3) s = s[0] + s[0] + s[1] + s[1] + s[2] + s[2]
+  const n = parseInt(s, 16)
+  if (Number.isNaN(n)) return 0
+  const r = ((n >> 16) & 255) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min
+  if (d === 0) return 0
+  let h = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4
+  h *= 60
+  return h < 0 ? h + 360 : h
+}
 
 /**
  * Editor for a selected video effect (spec 23) — mirrors ZoomEditor. Shared controls (intensity +
@@ -845,6 +889,19 @@ function EffectEditor({
   const withinSpan = globalTime >= effect.startTime && globalTime <= end
   const vig = effect.vignette
   const old = effect.oldfilm
+  const hue = effect.hue
+  const leak = effect.lightleak
+  const chroma = effect.chromatic
+  const gmap = effect.gradientmap
+  const post = effect.posterize
+  const duo = effect.threshold
+  const swap = effect.channelswap
+  const iso = effect.colorisolate
+  const dith = effect.dither
+  const crt = effect.crt
+  const vhs = effect.vhs
+  const half = effect.halftone
+  const comic = effect.comic
 
   // Update one vignette param (dispatched whole — UPDATE_EFFECT shallow-merges the top level only).
   const updateVignette = (patch: Partial<NonNullable<VideoEffect['vignette']>>) => {
@@ -951,6 +1008,412 @@ function EffectEditor({
         </Accordion>
       )}
 
+      {/* Hue shift (spec 24): static angle, or an animated psychedelic cycle */}
+      {effect.kind === 'hue' && hue && (
+        <Accordion title="Hue" defaultOpen>
+          <Field label="Animate">
+            <input
+              type="checkbox"
+              checked={hue.animate}
+              onChange={(e) => update({ hue: { ...hue, animate: e.target.checked } })}
+              className="cursor-pointer"
+            />
+          </Field>
+          {!hue.animate ? (
+            <Field label="Angle">
+              <div className="flex items-center gap-2 w-full">
+                <input
+                  type="range" min={0} max={360} step={1}
+                  value={Math.round(hue.angle)}
+                  onChange={(e) => updateTransient({ hue: { ...hue, angle: Number(e.target.value) } })}
+                  onPointerUp={commit} onKeyUp={commit}
+                  className="w-full"
+                />
+                <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{Math.round(hue.angle)}°</span>
+              </div>
+            </Field>
+          ) : (
+            <Field label="Speed">
+              <div className="flex items-center gap-2 w-full">
+                <input
+                  type="range" min={5} max={360} step={5}
+                  value={Math.round(hue.speed)}
+                  onChange={(e) => updateTransient({ hue: { ...hue, speed: Number(e.target.value) } })}
+                  onPointerUp={commit} onKeyUp={commit}
+                  className="w-full"
+                />
+                <span className="text-[10px] text-subtle tabular-nums w-10 text-right">{Math.round(hue.speed)}°/s</span>
+              </div>
+            </Field>
+          )}
+          {hue.animate && (
+            <p className="text-[10px] text-subtle">Animated hue cycles continuously — set Ease in/out to 0 to avoid a pop at the edges.</p>
+          )}
+        </Accordion>
+      )}
+
+      {/* Light leak (spec 24): colour, streak angle, drift speed */}
+      {effect.kind === 'lightleak' && leak && (
+        <Accordion title="Light Leak" defaultOpen>
+          <Field label="Colour">
+            <input
+              type="color"
+              value={leak.color}
+              onChange={(e) => updateTransient({ lightleak: { ...leak, color: e.target.value } })}
+              onBlur={commit}
+              className="h-7 w-full cursor-pointer rounded border border-border bg-transparent"
+            />
+          </Field>
+          <Field label="Angle">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range" min={0} max={360} step={1}
+                value={Math.round(leak.angle)}
+                onChange={(e) => updateTransient({ lightleak: { ...leak, angle: Number(e.target.value) } })}
+                onPointerUp={commit} onKeyUp={commit}
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{Math.round(leak.angle)}°</span>
+            </div>
+          </Field>
+          <Field label="Speed">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range" min={0} max={100} step={1}
+                value={Math.round(leak.speed * 100)}
+                onChange={(e) => updateTransient({ lightleak: { ...leak, speed: Number(e.target.value) / 100 } })}
+                onPointerUp={commit} onKeyUp={commit}
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{Math.round(leak.speed * 100)}</span>
+            </div>
+          </Field>
+        </Accordion>
+      )}
+
+      {/* Chromatic split (spec 24): separation distance + direction */}
+      {effect.kind === 'chromatic' && chroma && (
+        <Accordion title="Chromatic" defaultOpen>
+          <Field label="Offset">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range" min={0} max={40} step={0.5}
+                value={chroma.offset}
+                onChange={(e) => updateTransient({ chromatic: { ...chroma, offset: Number(e.target.value) } })}
+                onPointerUp={commit} onKeyUp={commit}
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-10 text-right">{chroma.offset}px</span>
+            </div>
+          </Field>
+          <Field label="Angle">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range" min={0} max={360} step={1}
+                value={Math.round(chroma.angle)}
+                onChange={(e) => updateTransient({ chromatic: { ...chroma, angle: Number(e.target.value) } })}
+                onPointerUp={commit} onKeyUp={commit}
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{Math.round(chroma.angle)}°</span>
+            </div>
+          </Field>
+          <p className="text-[10px] text-subtle">Offset is the peak separation at 100% Intensity — pair a short Ease in/out for a punch on an impact.</p>
+        </Accordion>
+      )}
+
+      {/* Gradient map (spec 25, WebGL): choose the false-colour ramp */}
+      {effect.kind === 'gradientmap' && gmap && (
+        <Accordion title="Gradient Map" defaultOpen>
+          <Field label="Ramp">
+            <select
+              value={gmap.preset}
+              onChange={(e) => update({ gradientmap: { ...gmap, preset: e.target.value as GradientMapPreset } })}
+              className={SELECT_CLS}
+            >
+              <option value="thermal">Thermal</option>
+              <option value="nightvision">Night Vision</option>
+              <option value="infrared">Infrared</option>
+              <option value="risograph">Risograph</option>
+              <option value="cinematic">Cinematic (Teal &amp; Orange)</option>
+              <option value="cinemacool">Cinematic (Cool)</option>
+            </select>
+          </Field>
+          <p className="text-[10px] text-subtle">Maps brightness through a colour ramp (GPU shader). Intensity blends between the original and the mapped look.</p>
+        </Accordion>
+      )}
+
+      {/* Posterize (spec 25, WebGL): quantize to N bands per channel */}
+      {effect.kind === 'posterize' && post && (
+        <Accordion title="Posterize" defaultOpen>
+          <Field label="Levels">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range" min={2} max={16} step={1}
+                value={post.levels}
+                onChange={(e) => updateTransient({ posterize: { ...post, levels: Number(e.target.value) } })}
+                onPointerUp={commit} onKeyUp={commit}
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{post.levels}</span>
+            </div>
+          </Field>
+          <p className="text-[10px] text-subtle">Fewer levels = flatter, more graphic banding.</p>
+        </Accordion>
+      )}
+
+      {/* Duotone / threshold (spec 25, WebGL): two colours split by luminance */}
+      {effect.kind === 'threshold' && duo && (
+        <Accordion title="Duotone" defaultOpen>
+          <Field label="Dark">
+            <input
+              type="color"
+              value={duo.dark}
+              onChange={(e) => updateTransient({ threshold: { ...duo, dark: e.target.value } })}
+              onBlur={commit}
+              className="h-7 w-full cursor-pointer rounded border border-border bg-transparent"
+            />
+          </Field>
+          <Field label="Light">
+            <input
+              type="color"
+              value={duo.light}
+              onChange={(e) => updateTransient({ threshold: { ...duo, light: e.target.value } })}
+              onBlur={commit}
+              className="h-7 w-full cursor-pointer rounded border border-border bg-transparent"
+            />
+          </Field>
+          <Field label="Split">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range" min={0} max={100} step={1}
+                value={Math.round(duo.threshold * 100)}
+                onChange={(e) => updateTransient({ threshold: { ...duo, threshold: Number(e.target.value) / 100 } })}
+                onPointerUp={commit} onKeyUp={commit}
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{Math.round(duo.threshold * 100)}%</span>
+            </div>
+          </Field>
+          <p className="text-[10px] text-subtle">Pixels darker than the split take the Dark colour; brighter take Light.</p>
+        </Accordion>
+      )}
+
+      {/* Channel swap (spec 25, WebGL): permute RGB */}
+      {effect.kind === 'channelswap' && swap && (
+        <Accordion title="Channel Swap" defaultOpen>
+          <Field label="Mapping">
+            <select
+              value={swap.mapping}
+              onChange={(e) => update({ channelswap: { ...swap, mapping: e.target.value as ChannelSwapMapping } })}
+              className={SELECT_CLS}
+            >
+              <option value="rbg">R → R, G → B, B → G (rbg)</option>
+              <option value="grb">grb</option>
+              <option value="brg">brg</option>
+              <option value="bgr">bgr (swap R/B)</option>
+              <option value="gbr">gbr</option>
+            </select>
+          </Field>
+          <p className="text-[10px] text-subtle">Reorders the red / green / blue channels for a false-colour shift.</p>
+        </Accordion>
+      )}
+
+      {/* Colour isolation (spec 25, WebGL): keep one hue, desaturate the rest */}
+      {effect.kind === 'colorisolate' && iso && (
+        <Accordion title="Colour Isolate" defaultOpen>
+          <Field label="Colour">
+            <input
+              type="color"
+              value={hueToHex(iso.hue)}
+              onChange={(e) => updateTransient({ colorisolate: { ...iso, hue: hexToHue(e.target.value) } })}
+              onBlur={commit}
+              className="h-7 w-full cursor-pointer rounded border border-border bg-transparent"
+            />
+          </Field>
+          <Field label="Tolerance">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range" min={5} max={120} step={1}
+                value={Math.round(iso.tolerance)}
+                onChange={(e) => updateTransient({ colorisolate: { ...iso, tolerance: Number(e.target.value) } })}
+                onPointerUp={commit} onKeyUp={commit}
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{Math.round(iso.tolerance)}°</span>
+            </div>
+          </Field>
+          <p className="text-[10px] text-subtle">Keeps colours near the chosen hue; everything else goes greyscale.</p>
+        </Accordion>
+      )}
+
+      {/* Dither (spec 25, WebGL): ordered Bayer dithering + quantization */}
+      {effect.kind === 'dither' && dith && (
+        <Accordion title="Dither" defaultOpen>
+          <Field label="Levels">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range" min={2} max={6} step={1}
+                value={dith.levels}
+                onChange={(e) => updateTransient({ dither: { ...dith, levels: Number(e.target.value) } })}
+                onPointerUp={commit} onKeyUp={commit}
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{dith.levels}</span>
+            </div>
+          </Field>
+          <Field label="Cell">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range" min={1} max={8} step={1}
+                value={dith.scale}
+                onChange={(e) => updateTransient({ dither: { ...dith, scale: Number(e.target.value) } })}
+                onPointerUp={commit} onKeyUp={commit}
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{dith.scale}px</span>
+            </div>
+          </Field>
+          <p className="text-[10px] text-subtle">Retro ordered-dithering. Fewer levels + bigger cells = chunkier, more 8-bit.</p>
+        </Accordion>
+      )}
+
+      {/* CRT (spec 25, WebGL): barrel curvature + scanlines + phosphor mask */}
+      {effect.kind === 'crt' && crt && (
+        <Accordion title="CRT" defaultOpen>
+          <Field label="Curvature">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range" min={0} max={100} step={1}
+                value={Math.round(crt.curvature * 100)}
+                onChange={(e) => updateTransient({ crt: { ...crt, curvature: Number(e.target.value) / 100 } })}
+                onPointerUp={commit} onKeyUp={commit}
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{Math.round(crt.curvature * 100)}%</span>
+            </div>
+          </Field>
+          <Field label="Scanlines">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range" min={0} max={100} step={1}
+                value={Math.round(crt.scanline * 100)}
+                onChange={(e) => updateTransient({ crt: { ...crt, scanline: Number(e.target.value) / 100 } })}
+                onPointerUp={commit} onKeyUp={commit}
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{Math.round(crt.scanline * 100)}%</span>
+            </div>
+          </Field>
+          <Field label="Zoom">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range" min={0} max={100} step={1}
+                value={Math.round(crt.zoom * 100)}
+                onChange={(e) => updateTransient({ crt: { ...crt, zoom: Number(e.target.value) / 100 } })}
+                onPointerUp={commit} onKeyUp={commit}
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{Math.round(crt.zoom * 100)}%</span>
+            </div>
+          </Field>
+          <p className="text-[10px] text-subtle">Screen curvature, scanlines &amp; an RGB phosphor mask. Zoom crops into the centre so the curved edges hide the black bezel.</p>
+        </Accordion>
+      )}
+
+      {/* VHS (spec 25, WebGL, animated): chroma bleed + tracking noise */}
+      {effect.kind === 'vhs' && vhs && (
+        <Accordion title="VHS" defaultOpen>
+          <Field label="Chroma bleed">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range" min={0} max={100} step={1}
+                value={Math.round(vhs.bleed * 100)}
+                onChange={(e) => updateTransient({ vhs: { ...vhs, bleed: Number(e.target.value) / 100 } })}
+                onPointerUp={commit} onKeyUp={commit}
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{Math.round(vhs.bleed * 100)}%</span>
+            </div>
+          </Field>
+          <Field label="Tracking">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range" min={0} max={100} step={1}
+                value={Math.round(vhs.noise * 100)}
+                onChange={(e) => updateTransient({ vhs: { ...vhs, noise: Number(e.target.value) / 100 } })}
+                onPointerUp={commit} onKeyUp={commit}
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{Math.round(vhs.noise * 100)}%</span>
+            </div>
+          </Field>
+          <p className="text-[10px] text-subtle">Chroma bleed, line wobble &amp; a scrolling tracking-noise band (animated).</p>
+        </Accordion>
+      )}
+
+      {/* Halftone (spec 25, WebGL): comic dot screen */}
+      {effect.kind === 'halftone' && half && (
+        <Accordion title="Halftone" defaultOpen>
+          <Field label="Dot size">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range" min={2} max={16} step={1}
+                value={half.cell}
+                onChange={(e) => updateTransient({ halftone: { ...half, cell: Number(e.target.value) } })}
+                onPointerUp={commit} onKeyUp={commit}
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{half.cell}px</span>
+            </div>
+          </Field>
+          <Field label="Angle">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range" min={0} max={90} step={1}
+                value={Math.round(half.angle)}
+                onChange={(e) => updateTransient({ halftone: { ...half, angle: Number(e.target.value) } })}
+                onPointerUp={commit} onKeyUp={commit}
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{Math.round(half.angle)}°</span>
+            </div>
+          </Field>
+          <p className="text-[10px] text-subtle">Dot size scales with brightness; rotate the screen angle for the classic print look.</p>
+        </Accordion>
+      )}
+
+      {/* Comic ink (spec 25, WebGL): Sobel edges over a posterized base */}
+      {effect.kind === 'comic' && comic && (
+        <Accordion title="Comic Ink" defaultOpen>
+          <Field label="Colours">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range" min={2} max={8} step={1}
+                value={comic.levels}
+                onChange={(e) => updateTransient({ comic: { ...comic, levels: Number(e.target.value) } })}
+                onPointerUp={commit} onKeyUp={commit}
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{comic.levels}</span>
+            </div>
+          </Field>
+          <Field label="Ink">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range" min={5} max={30} step={1}
+                value={Math.round(comic.thickness * 10)}
+                onChange={(e) => updateTransient({ comic: { ...comic, thickness: Number(e.target.value) / 10 } })}
+                onPointerUp={commit} onKeyUp={commit}
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{comic.thickness.toFixed(1)}</span>
+            </div>
+          </Field>
+          <p className="text-[10px] text-subtle">Sobel edge-detect ink lines over a posterized base. Ink = line thickness.</p>
+        </Accordion>
+      )}
+
       {/* Timing envelope — identical shape to the zoom's */}
       <Accordion title="Timing">
         <Field label="Start (s)">
@@ -1015,6 +1478,19 @@ const SECTION_ICONS: Record<string, React.ReactNode> = {
   Effects: <IconSparkles size={15} stroke={2} />,
   Vignette: <IconSparkles size={15} stroke={2} />,
   'Old Film': <IconSparkles size={15} stroke={2} />,
+  Hue: <IconSparkles size={15} stroke={2} />,
+  'Light Leak': <IconSparkles size={15} stroke={2} />,
+  Chromatic: <IconSparkles size={15} stroke={2} />,
+  'Gradient Map': <IconSparkles size={15} stroke={2} />,
+  Posterize: <IconSparkles size={15} stroke={2} />,
+  Duotone: <IconSparkles size={15} stroke={2} />,
+  'Channel Swap': <IconSparkles size={15} stroke={2} />,
+  'Colour Isolate': <IconSparkles size={15} stroke={2} />,
+  Dither: <IconSparkles size={15} stroke={2} />,
+  CRT: <IconSparkles size={15} stroke={2} />,
+  VHS: <IconSparkles size={15} stroke={2} />,
+  Halftone: <IconSparkles size={15} stroke={2} />,
+  'Comic Ink': <IconSparkles size={15} stroke={2} />,
 }
 
 function Accordion({ title, children, defaultOpen = false }: { title: string; children: React.ReactNode; defaultOpen?: boolean }) {
