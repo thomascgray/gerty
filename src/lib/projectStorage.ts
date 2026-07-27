@@ -3,7 +3,7 @@ import type { Project } from '../types'
 import { createDefaultProject } from '../types'
 import { getAssetBlob, storeAssetBlob } from './assetStore'
 
-const STORAGE_KEY = 'video-editor-project'
+const STORAGE_KEY = 'gerty-project'
 
 export function saveProject(project: Project): void {
   try {
@@ -35,7 +35,7 @@ export function clearProject(): void {
 }
 
 /**
- * Export project as a .tve file (ZIP archive containing project.json + assets/).
+ * Export project as a .gerty file (ZIP archive containing project.json + assets/).
  */
 export async function exportProjectBrep(project: Project): Promise<void> {
   const zip = new JSZip()
@@ -58,19 +58,19 @@ export async function exportProjectBrep(project: Project): Promise<void> {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `${project.name.replace(/\s+/g, '-').toLowerCase()}.tve`
+  a.download = `${project.name.replace(/\s+/g, '-').toLowerCase()}.gerty`
   a.click()
   URL.revokeObjectURL(url)
 }
 
 /**
- * Import a .tve file. Extracts assets into IndexedDB and returns the project.
+ * Import a .gerty file. Extracts assets into IndexedDB and returns the project.
  */
 export async function importProjectBrep(file: File): Promise<Project> {
   const zip = await JSZip.loadAsync(file)
 
   const projectJson = zip.file('project.json')
-  if (!projectJson) throw new Error('Invalid .tve file: missing project.json')
+  if (!projectJson) throw new Error('Invalid .gerty file: missing project.json')
 
   const projectText = await projectJson.async('text')
   const project = JSON.parse(projectText) as Project

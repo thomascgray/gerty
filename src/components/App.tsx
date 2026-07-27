@@ -54,7 +54,7 @@ export default function App() {
   // Reflect the project name in the browser tab.
   useEffect(() => {
     const name = project.name.trim()
-    document.title = name ? `${name} - Video Editor` : 'Video Editor'
+    document.title = name ? `${name} - Gerty` : 'Gerty'
   }, [project.name])
 
   // Audio/video playback sync — preview speed keeps media in step with the sped-up playhead.
@@ -206,7 +206,7 @@ export default function App() {
 
   const handleExportProject = useCallback(async () => {
     await exportProjectBrep(project)
-    markSaved() // the .tve file now matches the in-memory project → clear the unsaved-changes guard
+    markSaved() // the .gerty file now matches the in-memory project → clear the unsaved-changes guard
   }, [project, markSaved])
 
   const handleImportProject = useCallback(async (file: File) => {
@@ -219,7 +219,7 @@ export default function App() {
     }
   }, [dispatch])
 
-  // Loading a .tve replaces the whole project, discarding any unsaved edits — confirm first.
+  // Loading a .gerty replaces the whole project, discarding any unsaved edits — confirm first.
   const handleLoadClick = useCallback(() => {
     if (isDirty && !window.confirm('You have unsaved changes that will be lost. Load a different project anyway?')) {
       return
@@ -554,21 +554,21 @@ export default function App() {
           <button
             onClick={handleExportProject}
             className="flex items-center gap-1 px-2 py-1 text-xs text-muted hover:text-fg bg-surface-muted hover:bg-surface-hover rounded transition-colors cursor-pointer"
-            title="Save project as .tve"
+            title="Save project as .gerty"
           >
             <IconDeviceFloppy size={14} stroke={2} /> Save
           </button>
           <button
             onClick={handleLoadClick}
             className="flex items-center gap-1 px-2 py-1 text-xs text-muted hover:text-fg bg-surface-muted hover:bg-surface-hover rounded transition-colors cursor-pointer"
-            title="Load project from .tve"
+            title="Load project from .gerty"
           >
             <IconFolderOpen size={14} stroke={2} /> Load
           </button>
           <input
             ref={projectFileRef}
             type="file"
-            accept=".tve"
+            accept=".gerty,.tve"
             className="hidden"
             onChange={(e) => {
               const file = e.target.files?.[0]

@@ -1,4 +1,4 @@
-# Video Editor — architecture guide
+# Gerty — architecture guide
 
 A browser-based video editor: **React 19 + TypeScript + Canvas 2D + WebCodecs**, bundled with Vite, styled with Tailwind v4. No backend — everything runs client-side; assets live in IndexedDB, projects in localStorage. Output is MP4 (H.264 + AAC) muxed in-browser with `mp4-muxer`.
 
@@ -154,7 +154,7 @@ Tiered: **WebCodecs `VideoEncoder` + `mp4-muxer`** (primary, main thread) → **
 | Lanes / selection | `Timeline.tsx` (lane range, multi-select gestures, group move, trim/split bars), `App.tsx` (`selectedObjectIds` + derived `selectedObjectId`) |
 | Drawing | `src/lib/annotations.ts` (arrow/text/shape/freehand + bezier math) |
 | Media/assets | `src/lib/assetStore.ts`, `mediaRegistry.ts`, `src/lib/mediaTiming.ts` (trim/speed/window mapping) |
-| Persistence | `src/lib/projectStorage.ts` (localStorage + `.tve` zip export/import) |
+| Persistence | `src/lib/projectStorage.ts` (localStorage + `.gerty` zip export/import) |
 | Export | `src/lib/ffmpegExport.ts`, `videoDecoder.ts`, `exportWorker.ts`, `exportWorkerTypes.ts` |
 | UI | `App.tsx`, `Canvas.tsx` (viewport+overlay), `Timeline.tsx`, `PropertiesPanel.tsx`, `AnnotationTools.tsx`, `ImportModal.tsx`, `ExportModal.tsx` |
 

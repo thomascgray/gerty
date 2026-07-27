@@ -1,6 +1,6 @@
 import type { AssetMeta, AssetType } from '../types'
 
-const DB_NAME = 'video-editor-assets'
+const DB_NAME = 'gerty-assets'
 const DB_VERSION = 1
 const STORE_NAME = 'blobs'
 

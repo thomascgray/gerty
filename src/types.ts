@@ -419,7 +419,7 @@ export type ProjectAction =
   | { type: 'CLEAR_MARKERS' }
   | { type: 'UNDO' }
   | { type: 'REDO' }
-  | { type: 'MARK_SAVED' }  // clears the unsaved-changes flag after a .tve export (no history change)
+  | { type: 'MARK_SAVED' }  // clears the unsaved-changes flag after a .gerty export (no history change)
 
 // === Factory Functions ===
 

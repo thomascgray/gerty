@@ -1,4 +1,4 @@
-# Video Editor
+# Gerty
 
 #### A browser-based, open source, free to use video editor.
 
@@ -9,7 +9,7 @@
 - Add custom arrows, text, with animated effects, keyframing
 - Preview the video in real time. Export to MP4, with customisable quality/size
 
-## https://video.tomg.cool/ 👈 use it right now
+## https://gerty.tomg.cool/ 👈 use it right now
 
 https://github.com/user-attachments/assets/b078db2a-b289-4c58-b6ba-dfc386c7d952
 
@@ -26,7 +26,7 @@ https://github.com/user-attachments/assets/b078db2a-b289-4c58-b6ba-dfc386c7d952
 - **One-click presets** - drop a whole graded look on a clip: **Cinematic** (teal & orange), **Cinematic Cool**, **Super 8**, **Retro TV**, **Film Noir**, **Comic Book** and more. Every preset is just a starting point you can tweak.
 - **Mark the beat** - tap `M` while it plays to drop markers, then snap edits to them.
 - **Preview live, then export** - real-time preview, then export to **MP4** (H.264 + AAC) at a resolution and quality you choose, with a file-size estimate before you commit.
-- **Save your work** - export a project to a `.tve` file and re-import it later to pick up where you left off.
+- **Save your work** - export a project to a `.gerty` file and re-import it later to pick up where you left off.
 
 ## Keyboard shortcuts
 

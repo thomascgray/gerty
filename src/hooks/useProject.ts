@@ -85,7 +85,7 @@ type UndoableState = {
 }
 
 function projectReducer(state: UndoableState, action: ProjectAction): UndoableState {
-  // Clears the unsaved-changes flag after a .tve export — no history mutation.
+  // Clears the unsaved-changes flag after a .gerty export — no history mutation.
   if (action.type === 'MARK_SAVED') {
     return state.dirty ? { ...state, dirty: false } : state
   }
@@ -361,7 +361,7 @@ export function useProject() {
   }, [state.present])
 
   // Remember the canvas size for the next new project (spec 18-qol R3). This preference persists
-  // independently of `config.persistProject`, undo/redo, and `.tve` export — mirrors `useUiPrefs`.
+  // independently of `config.persistProject`, undo/redo, and `.gerty` export — mirrors `useUiPrefs`.
   useEffect(() => {
     saveCanvasSize({ width: state.present.width, height: state.present.height })
   }, [state.present.width, state.present.height])
