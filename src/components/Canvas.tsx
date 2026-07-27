@@ -156,10 +156,61 @@ const MIN_SIZE = 0.01; // minimum object size in normalized coords
 const MIN_ZOOM_SCALE = 1; // full frame (spec 13: scale >= 1 only)
 const MAX_ZOOM_SCALE = 20; // sanity cap for on-canvas resize
 
-// Overlay bleed (spec 18-qol R1): the overlay canvas extends BLEED×frame beyond every edge so an
-// object larger than the frame still shows + can grab its resize/rotate handles in the black margin.
-// Only the overlay grows — the render canvas stays frame-only, so export/preview are unaffected.
-const BLEED = 0.4;
+// Overlay bleed & move clamp (spec 18-qol): objects can be dragged anywhere in the surrounding grey
+// viewport (e.g. to "start off screen") but not past it. Both the overlay's paint area and the drag
+// clamp are DYNAMIC — measured each layout from the real grey extent on each side of the frame (see
+// EditorBounds / the measuring layout effect) — so they always agree: the border/handles paint right
+// up to the grey edge, and that same edge is where the clamp stops the box.
+//
+// Extra padding (px) baked into the overlay bleed beyond the raw grey extent so the handles/rotation
+// handle — which sit a few px *outside* the bbox — still paint fully when a clip is parked against the
+// grey edge. Only the overlay grows by this; the clamp uses the raw grey extent.
+const HANDLE_BLEED_PX = 44;
+// A small floor so a frame that fully fills its axis (no grey) still gives a little off-frame room.
+const MIN_MARGIN = 0.06;
+
+// Per-side normalized margins the object bbox may extend past the frame (= the measured grey extent),
+// plus the symmetric overlay bleed per axis (max side + handle pad) that must cover them.
+type EditorBounds = {
+  marginL: number;
+  marginR: number;
+  marginT: number;
+  marginB: number;
+  bleedX: number;
+  bleedY: number;
+};
+const INITIAL_BOUNDS: EditorBounds = {
+  marginL: 0.4,
+  marginR: 0.4,
+  marginT: 0.4,
+  marginB: 0.4,
+  bleedX: 0.45,
+  bleedY: 0.45,
+};
+
+// Clamp an object's top-left (normalized) so its bbox stays within the grey viewport (frame ± the
+// per-side margins). Boxes larger than the region can't fit — for those the min/max invert and the
+// clamp instead keeps the box fully covering the region (pan, no gap beyond the grey).
+function clampObjectPos(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  b: EditorBounds,
+): { x: number; y: number } {
+  const minX = -b.marginL,
+    maxX = 1 + b.marginR - w;
+  const minY = -b.marginT,
+    maxY = 1 + b.marginB - h;
+  const loX = Math.min(minX, maxX),
+    hiX = Math.max(minX, maxX);
+  const loY = Math.min(minY, maxY),
+    hiY = Math.max(minY, maxY);
+  return {
+    x: Math.min(Math.max(x, loX), hiX),
+    y: Math.min(Math.max(y, loY), hiY),
+  };
+}
 
 // === Coordinate Helpers ===
 
@@ -536,6 +587,13 @@ export default function Canvas({
     null,
   );
 
+  // Dynamic overlay bleed + move clamp (spec 18-qol): measured from the real grey viewport each layout
+  // so objects can be staged anywhere in the grey but not past it, with handles always painted. A ref
+  // mirror lets the window-level drag listener read the latest bounds without re-subscribing.
+  const [bounds, setBounds] = useState<EditorBounds>(INITIAL_BOUNDS);
+  const boundsRef = useRef(bounds);
+  boundsRef.current = bounds;
+
   // In-place text editing (spec 18-qol R6): double-click a selected text object to edit its content
   // on the canvas. Ephemeral view state. `editValue` is the live text; the edited object is hidden
   // from the render (renderObjects) so the textarea is the only visible copy (no double image).
@@ -701,10 +759,11 @@ export default function Canvas({
   useEffect(() => {
     const oc = overlayCanvasRef.current;
     if (!oc) return;
-    // Enlarged by the bleed margin so out-of-frame chrome has somewhere to paint (R1).
-    oc.width = Math.round(width * (1 + 2 * BLEED));
-    oc.height = Math.round(height * (1 + 2 * BLEED));
-  }, [width, height]);
+    // Enlarged by the per-axis bleed so out-of-frame chrome anywhere in the grey has somewhere to
+    // paint (R1) — the bleed tracks the measured grey extent (see the measuring layout effect).
+    oc.width = Math.round(width * (1 + 2 * bounds.bleedX));
+    oc.height = Math.round(height * (1 + 2 * bounds.bleedY));
+  }, [width, height, bounds.bleedX, bounds.bleedY]);
 
   const selectedObjectRaw =
     objects.find((o) => o.id === selectedObjectId) ?? null;
@@ -763,7 +822,7 @@ export default function Canvas({
     // right place — with out-of-frame handles now inside the enlarged store instead of clipped.
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.setTransform(1, 0, 0, 1, BLEED * width, BLEED * height);
+    ctx.setTransform(1, 0, 0, 1, bounds.bleedX * width, bounds.bleedY * height);
 
     // Canvas border
     ctx.strokeStyle = "rgba(255, 255, 255, 0.15)";
@@ -1010,6 +1069,8 @@ export default function Canvas({
     zooms,
     selectedZoom,
     globalTime,
+    bounds.bleedX,
+    bounds.bleedY,
   ]);
 
   useEffect(() => {
@@ -1281,17 +1342,17 @@ export default function Canvas({
         const dragObj = selectedObjectRaw;
         const t = dragObj ? globalTime - dragObj.startTime : 0;
         if (dragObj && ds.kind === "move") {
+          const p = clampObjectPos(
+            ds.origX + (nx - ds.startNx),
+            ds.origY + (ny - ds.startNy),
+            dragObj.width,
+            dragObj.height,
+            boundsRef.current,
+          );
           dispatch({
             type: "UPDATE_OBJECT_TRANSIENT",
             objectId: ds.objectId,
-            updates: editPose(
-              dragObj,
-              {
-                x: ds.origX + (nx - ds.startNx),
-                y: ds.origY + (ny - ds.startNy),
-              },
-              t,
-            ),
+            updates: editPose(dragObj, { x: p.x, y: p.y }, t),
           });
         } else if (dragObj && ds.kind === "resize") {
           const result = computeResize(
@@ -1419,17 +1480,17 @@ export default function Canvas({
       const t = dragObj ? globalTime - dragObj.startTime : 0;
 
       if (dragObj && ds.kind === "move") {
+        const p = clampObjectPos(
+          ds.origX + (nx - ds.startNx),
+          ds.origY + (ny - ds.startNy),
+          dragObj.width,
+          dragObj.height,
+          boundsRef.current,
+        );
         dispatch({
           type: "UPDATE_OBJECT_TRANSIENT",
           objectId: ds.objectId,
-          updates: editPose(
-            dragObj,
-            {
-              x: ds.origX + (nx - ds.startNx),
-              y: ds.origY + (ny - ds.startNy),
-            },
-            t,
-          ),
+          updates: editPose(dragObj, { x: p.x, y: p.y }, t),
         });
       } else if (dragObj && ds.kind === "resize") {
         const result = computeResize(
@@ -1604,6 +1665,36 @@ export default function Canvas({
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  // Measure the grey viewport (spec 18-qol): the fit box is the letterboxed frame (untransformed, so
+  // stable under editor zoom/pan); the render area is the whole grey working area. The grey extent on
+  // each side / the frame size = how far past the frame the object bbox may travel, and how far the
+  // overlay must bleed to keep painting handles out there. Recomputed on any layout change.
+  useLayoutEffect(() => {
+    const fit = fitBoxRef.current;
+    const ra = renderAreaRef.current;
+    if (!fit || !ra) return;
+    const f = fit.getBoundingClientRect();
+    const r = ra.getBoundingClientRect();
+    if (f.width < 1 || f.height < 1) return;
+    const marginL = Math.max(MIN_MARGIN, (f.left - r.left) / f.width);
+    const marginR = Math.max(MIN_MARGIN, (r.right - f.right) / f.width);
+    const marginT = Math.max(MIN_MARGIN, (f.top - r.top) / f.height);
+    const marginB = Math.max(MIN_MARGIN, (r.bottom - f.bottom) / f.height);
+    // Symmetric overlay bleed per axis = the larger side + handle pad, so handles paint at any edge.
+    const bleedX = Math.max(marginL, marginR) + HANDLE_BLEED_PX / f.width;
+    const bleedY = Math.max(marginT, marginB) + HANDLE_BLEED_PX / f.height;
+    setBounds((prev) =>
+      prev.marginL === marginL &&
+      prev.marginR === marginR &&
+      prev.marginT === marginT &&
+      prev.marginB === marginB &&
+      prev.bleedX === bleedX &&
+      prev.bleedY === bleedY
+        ? prev
+        : { marginL, marginR, marginT, marginB, bleedX, bleedY },
+    );
+  }, [width, height, layoutTick]);
 
   // Audio has no canvas box (P4 → its props stay in the inspector). Hide during drag / playback /
   // Live view / point-drawing (OQ-6) to avoid jitter and occluding the interaction.
@@ -1913,13 +2004,13 @@ export default function Canvas({
           // region therefore stays pixel-aligned with the render canvas at every zoom/pan.
           className="absolute"
           style={{
-            left: `${-BLEED * 100}%`,
-            top: `${-BLEED * 100}%`,
-            width: `${(1 + 2 * BLEED) * 100}%`,
-            height: `${(1 + 2 * BLEED) * 100}%`,
+            left: `${-bounds.bleedX * 100}%`,
+            top: `${-bounds.bleedY * 100}%`,
+            width: `${(1 + 2 * bounds.bleedX) * 100}%`,
+            height: `${(1 + 2 * bounds.bleedY) * 100}%`,
             cursor,
             transform: viewportTransform,
-            transformOrigin: `${(BLEED / (1 + 2 * BLEED)) * 100}% ${(BLEED / (1 + 2 * BLEED)) * 100}%`,
+            transformOrigin: `${(bounds.bleedX / (1 + 2 * bounds.bleedX)) * 100}% ${(bounds.bleedY / (1 + 2 * bounds.bleedY)) * 100}%`,
           }}
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}

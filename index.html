@@ -8,6 +8,59 @@
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Gerty</title>
+    <!-- Small-screen blocking overlay styles — INLINED here (not in index.css) so they apply on the
+         first paint, before the JS bundle's CSS loads. Otherwise the unstyled .small-screen-block div
+         (below #root) renders as a default visible block for a moment, flashing the message on every
+         load, desktop included. Theme vars carry hardcoded fallbacks for the pre-index.css window. -->
+    <style>
+      .small-screen-block {
+        display: none;
+      }
+      @media (max-width: 1024px) {
+        .small-screen-block {
+          display: flex;
+          position: fixed;
+          inset: 0;
+          z-index: 9999;
+          align-items: center;
+          justify-content: center;
+          padding: 1.5rem;
+          background: var(--bg, #e8eaed);
+          color: var(--text, #1f2328);
+          font-family:
+            system-ui,
+            -apple-system,
+            sans-serif;
+          -webkit-text-size-adjust: 100%;
+        }
+        .small-screen-block__card {
+          max-width: 22rem;
+          text-align: center;
+        }
+        .small-screen-block__emoji {
+          font-size: 3rem;
+          line-height: 1;
+          margin-bottom: 1rem;
+        }
+        .small-screen-block h1 {
+          font-size: 1.35rem;
+          font-weight: 700;
+          line-height: 1.25;
+          margin: 0 0 0.75rem;
+        }
+        .small-screen-block p {
+          font-size: 0.95rem;
+          line-height: 1.5;
+          color: var(--text-muted, #5c6470);
+          margin: 0 0 0.75rem;
+        }
+        .small-screen-block__soon {
+          color: var(--accent, #e74c3c) !important;
+          font-weight: 600;
+          margin-bottom: 0 !important;
+        }
+      }
+    </style>
   </head>
   <body>
     <!-- Blocking screen for devices too small for the editor (see .small-screen-block in index.css) -->
@@ -18,7 +71,7 @@
     >
       <div class="small-screen-block__card">
         <div class="small-screen-block__emoji">🎬</div>
-        <h1>Gerty isn't mobile friendly&nbsp;yet</h1>
+        <h1>Gerty isn't mobile friendly - sorry!</h1>
         <p>
           Gerty is a full desktop video editor and needs a bigger screen to
           work. Please open it on a laptop or desktop.

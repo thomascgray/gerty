@@ -83,51 +83,7 @@
 
 /* ===== Small-screen blocking overlay =========================================
    Gerty is a desktop editor; below ~laptop width the timeline/canvas UI is
-   unusable. This pure-CSS overlay (markup in index.html, above #root) covers the
-   app and shows a "not mobile friendly yet" message. No JS: it renders before
-   React mounts and blocks all interaction with the editor underneath. */
-.small-screen-block {
-  display: none;
-}
-
-@media (max-width: 1024px) {
-  .small-screen-block {
-    display: flex;
-    position: fixed;
-    inset: 0;
-    z-index: 9999;
-    align-items: center;
-    justify-content: center;
-    padding: 1.5rem;
-    background: var(--bg);
-    color: var(--text);
-    font-family: system-ui, -apple-system, sans-serif;
-    -webkit-text-size-adjust: 100%;
-  }
-  .small-screen-block__card {
-    max-width: 22rem;
-    text-align: center;
-  }
-  .small-screen-block__emoji {
-    font-size: 3rem;
-    line-height: 1;
-    margin-bottom: 1rem;
-  }
-  .small-screen-block h1 {
-    font-size: 1.35rem;
-    font-weight: 700;
-    line-height: 1.25;
-    margin: 0 0 0.75rem;
-  }
-  .small-screen-block p {
-    font-size: 0.95rem;
-    line-height: 1.5;
-    color: var(--text-muted);
-    margin: 0 0 0.75rem;
-  }
-  .small-screen-block__soon {
-    color: var(--accent) !important;
-    font-weight: 600;
-    margin-bottom: 0 !important;
-  }
-}
+   unusable. The overlay markup lives in index.html (above #root) and its styles
+   are INLINED in index.html's <head> — NOT here — so they apply on the first
+   paint. If they lived in this bundle-loaded stylesheet, the unstyled div would
+   flash the message on every load (desktop included) before this CSS applied. */
