@@ -54,7 +54,7 @@ export default function App() {
   // Reflect the project name in the browser tab.
   useEffect(() => {
     const name = project.name.trim()
-    document.title = name ? `${name} — Video Editor` : 'Video Editor'
+    document.title = name ? `${name} - Video Editor` : 'Video Editor'
   }, [project.name])
 
   // Audio/video playback sync — preview speed keeps media in step with the sped-up playhead.
@@ -309,13 +309,17 @@ export default function App() {
     const remembered = getRememberedStyle(type)
     const style = type === 'text' ? { color: '#FFFFFF', ...remembered } : remembered
 
+    // Shapes (rect/circle) aren't drag-drawn — they drop as a centered mid-frame box the user then
+    // moves/resizes on canvas (full-frame would just outline the whole frame). Text has its own box;
+    // arrow/freehand/photo/media fill the frame (0,0,1,1) and are positioned by drawing/cover-fit.
+    const isShape = type === 'rectangle' || type === 'circle'
     const obj = createTimelineObject(type, data, {
       startTime: playback.globalTime,
       duration: 5,
-      x: type === 'text' ? 0.3 : 0,
-      y: type === 'text' ? 0.4 : 0,
-      width: type === 'text' ? 0.4 : 1,
-      height: type === 'text' ? 0.2 : 1,
+      x: type === 'text' ? 0.3 : isShape ? 0.3 : 0,
+      y: type === 'text' ? 0.4 : isShape ? 0.3 : 0,
+      width: type === 'text' ? 0.4 : isShape ? 0.4 : 1,
+      height: type === 'text' ? 0.2 : isShape ? 0.4 : 1,
       style,
     })
 

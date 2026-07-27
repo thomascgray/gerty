@@ -4,7 +4,7 @@ import { getAssetUrl } from '../lib/assetStore'
 import { EFFECT_PRESETS } from '../lib/effectPresets'
 import {
   IconPhoto, IconTypography, IconShape, IconZoomScan,
-  IconArrowUpRight, IconScribble, IconPhotoPlus, IconMusic,
+  IconArrowUpRight, IconScribble, IconPhotoPlus, IconMusic, IconSquare, IconCircle,
   IconChevronLeft, IconChevronRight, IconSparkles,
   IconContrast, IconDroplet, IconColorSwatch, IconVignette, IconGrain, IconMovie,
   IconRainbow, IconContrast2, IconSunHigh, IconFlare, IconAperture, IconGridDots, IconGradienter,
@@ -120,6 +120,8 @@ export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateObjec
             <div className="flex-1 min-h-0 overflow-y-auto">
               <SimpleSection title="Elements" items={[
                 { label: 'Arrow', Icon: IconArrowUpRight, onClick: () => onCreateObject('arrow') },
+                { label: 'Rectangle', Icon: IconSquare, onClick: () => onCreateObject('rectangle') },
+                { label: 'Circle', Icon: IconCircle, onClick: () => onCreateObject('circle') },
                 { label: 'Pen', Icon: IconScribble, onClick: () => onCreateObject('freehand') },
               ]} />
             </div>

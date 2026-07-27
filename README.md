@@ -1,101 +1,77 @@
 # Video Editor
 
-### A browser-based, open source, free to use video editor. Imports photos, video clips, annotate them with arrows and text and zooms. Preview the video in real time. Export to MP4.
+#### A browser-based, open source, free to use video editor.
 
-### Try it right now at https://video.tomg.cool/
+- No login, no tracking, no ads
+- No "AI plz make me a video" bullshit
+- Code is fully open source
+- Import images, video clips, audio clips
+- Add custom arrows, text, with animated effects, keyframing
+- Preview the video in real time. Export to MP4, with customisable quality/size
+
+## https://video.tomg.cool/ 👈 use it right now
 
 https://github.com/user-attachments/assets/b078db2a-b289-4c58-b6ba-dfc386c7d952
 
 ---
 
-## Tech Stack
+## What you can do
 
-- **React + Vite** — TypeScript, fast HMR
-- **Tailwind CSS v4** — utility-first dark theme
-- **Canvas 2D** — native canvas rendering, no abstraction layer
+- **Bring in your media** - drop in images, video clips and audio. Everything stays on your machine; nothing is uploaded.
+- **Build on a timeline** - stack clips on layers, move and group them, trim their ends, and split a clip in two at the playhead.
+- **Annotate** - arrows, text boxes, rectangles, circles and freehand pen, all fully stylable.
+- **Animate anything** - keyframe an object's position, size, rotation and opacity; add on-appear / on-exit transitions; give text a type-on reveal and arrows a draw-on.
+- **Add a camera** - screen-recorder-style zoom and pan push-ins that glide across the frame, with their own keyframes.
+- **Grade and stylise** - a deep effects menu: black & white, sepia, vignette, film grain, old film, hue shift, contrast, bleach bypass, light leaks, chromatic split, plus GPU shader looks like gradient maps, duotone, CRT, VHS, halftone and comic ink.
+- **One-click presets** - drop a whole graded look on a clip: **Cinematic** (teal & orange), **Cinematic Cool**, **Super 8**, **Retro TV**, **Film Noir**, **Comic Book** and more. Every preset is just a starting point you can tweak.
+- **Mark the beat** - tap `M` while it plays to drop markers, then snap edits to them.
+- **Preview live, then export** - real-time preview, then export to **MP4** (H.264 + AAC) at a resolution and quality you choose, with a file-size estimate before you commit.
+- **Save your work** - export a project to a `.tve` file and re-import it later to pick up where you left off.
 
-## Getting Started
+## Keyboard shortcuts
+
+| Key                  | Action                                             |
+| -------------------- | -------------------------------------------------- |
+| Space                | Play / pause                                        |
+| V                    | Toggle camera **Live** / **Frame** view             |
+| M                    | Drop a marker at the playhead (works while playing) |
+| , / .                | Jump to previous / next marker                      |
+| S                    | Split the selected audio/video clip at the playhead |
+| H                    | Hide / show the selected object or zoom             |
+| Delete / Backspace   | Delete the selection                                |
+| Ctrl+Z               | Undo                                                |
+| Ctrl+Y / Ctrl+Shift+Z| Redo                                                |
+| Enter / Escape       | Finish the current drawing / deselect               |
+
+## Privacy
+
+There is no backend. Your media never leaves the browser - imported files live in your browser's own storage (IndexedDB) and rendering, editing and export all happen locally on your device.
+
+---
+
+## Running it locally
 
 ```bash
 npm install
 npm run dev
 ```
 
-The dev server runs with `Cross-Origin-Opener-Policy` and `Cross-Origin-Embedder-Policy` headers enabled (required for FFmpeg.wasm's SharedArrayBuffer support).
-
-## Project Structure
-
-```
-src/
-  types.ts                        # Data model: Project, Slide, Annotation, etc.
-  components/
-    App.tsx                       # Root layout, keyboard shortcuts, state wiring
-    Sidebar.tsx                   # Slide list thumbnails + photo import
-    Canvas.tsx                    # Preview canvas with renderer hook
-    AnnotationTools.tsx           # Tool selector (select, arrow, text, rect, circle, pen)
-    SlidePanel.tsx                # Per-slide settings (duration, duplicate, delete)
-    AnnotationPanel.tsx           # Per-annotation settings (timing, style, color)
-    ExportModal.tsx               # Export dialog with progress bar
-  hooks/
-    useProject.ts                 # Project state + undo/redo (50-step history)
-    useCanvasRenderer.ts          # Draws a frame at time T onto a canvas element
-    usePlayback.ts                # requestAnimationFrame playback loop
-    useFFmpegExport.ts            # FFmpeg export with progress callback
-  lib/
-    renderer.ts                   # Pure renderFrame(ctx, slide, localTime) — no React
-    annotations.ts                # Drawing logic for each annotation type
-    ffmpegExport.ts               # FFmpeg.wasm export pipeline (frame-by-frame)
-    projectStorage.ts             # localStorage save/load + JSON import/export
-```
-
-## Architecture
-
-### Renderer is pure
-
-`renderer.ts` exposes `renderFrame(ctx, slide, localTime, options, img)` with no side effects and no React dependency. The same function is called from both the live preview RAF loop and the FFmpeg export loop, guaranteeing frame-identical output.
-
-### Normalised coordinates
-
-All annotation coordinates are normalised to 0–1 relative to the canvas. Pixel conversion happens only at draw time (`pixelX = normX * canvas.width`), so annotations scale correctly to any export resolution.
-
-### State management
-
-All project state lives in `useProject`, backed by `useReducer` with explicit action types. Every mutation pushes to an undo stack (max 50 snapshots). No scattered `useState` — components receive slices via props.
-
-### Auto-save
-
-Project state auto-saves to `localStorage` on every change (debounced 1s). Photos are stored as base64 in the JSON.
-
-## Keyboard Shortcuts
-
-| Key | Action |
-|---|---|
-| Space | Play / Pause |
-| A | Arrow tool |
-| T | Text tool |
-| R | Rectangle tool |
-| V | Select tool |
-| Delete / Backspace | Delete selected annotation |
-| Ctrl+Z | Undo |
-| Ctrl+Y | Redo |
-| [ / ] | Previous / next slide |
-| Escape | Deselect / cancel tool |
-
-## FFmpeg Export
-
-Export requires ffmpeg-core files in `public/ffmpeg/`. Copy them from `node_modules/@ffmpeg/core/dist/umd/`:
+Then open the printed local URL. To make a production build:
 
 ```bash
-mkdir -p public/ffmpeg
-cp node_modules/@ffmpeg/core/dist/umd/ffmpeg-core.js public/ffmpeg/
-cp node_modules/@ffmpeg/core/dist/umd/ffmpeg-core.wasm public/ffmpeg/
-```
-
-The export pipeline renders every frame to an OffscreenCanvas, writes PNGs to FFmpeg's virtual filesystem, then encodes to H.264 MP4.
-
-## Build
-
-```bash
-npm run build    # type-check + production build to dist/
+npm run build    # type-check + bundle to dist/
 npm run preview  # serve the production build locally
 ```
+
+### Tech stack
+
+- **React 19 + TypeScript**, bundled with **Vite**
+- **Tailwind CSS v4** for styling
+- **Canvas 2D** for the shared preview/export compositor, with a **WebGL** ([regl](https://github.com/regl-project/regl)) post-process pass for per-pixel shader effects
+- **WebCodecs + [mp4-muxer](https://github.com/Vanilagy/mp4-muxer)** for in-browser MP4 export (with a MediaRecorder → WebM fallback on browsers without WebCodecs)
+
+A single pure `renderFrame` compositor drives both the live preview and export, so what you see is what you get. For a full architecture tour, see [`CLAUDE.md`](CLAUDE.md).
+
+## License
+
+Licensed under the [GNU General Public License v3.0](LICENSE). You are free to use, study, share and modify this software; if you distribute a modified version, it must also be free software under the same license.
