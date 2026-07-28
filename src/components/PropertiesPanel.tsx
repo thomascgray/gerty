@@ -5,7 +5,7 @@ import {
   IconSparkles,
 } from '@tabler/icons-react'
 import type {
-  TimelineObject, ProjectAction, ArrowData, AudioData, VideoData, TextData, TextAlign,
+  TimelineObject, ProjectAction, ArrowData, AudioData, VideoData, TextData, TextAlign, PhotoData,
   AnimatableProperty, EasingKind, CameraZoom, VideoEffect, VideoEffectKind, VignetteShape,
   GradientMapPreset, ChannelSwapMapping,
 } from '../types'
@@ -600,6 +600,23 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
               className="w-full"
             />
           </Field>
+          {/* Animated images only (spec 28 B3/B12): the one playback control. Off = play
+              through once, then hold the last frame for the rest of the clip. `data` is
+              written WHOLE because UPDATE_OBJECT shallow-merges (a partial would drop assetId). */}
+          {obj.type === 'photo' && (obj.data as PhotoData).animated && (() => {
+            const pd = obj.data as PhotoData
+            return (
+              <Field label="Loop">
+                <input
+                  type="checkbox"
+                  checked={pd.loop !== false}
+                  onChange={(e) => update({ data: { ...pd, loop: e.target.checked } })}
+                  title="Repeat the animation for the whole clip. When off, it plays once and holds the last frame."
+                  className="accent-accent cursor-pointer"
+                />
+              </Field>
+            )
+          })()}
         </Accordion>
       )}
 

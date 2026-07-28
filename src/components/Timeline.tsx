@@ -1,6 +1,6 @@
 import { useRef, useCallback, useState, useEffect } from 'react'
 import { createPortal } from 'react-dom'
-import type { TimelineObject, ProjectAction, AudioData, VideoData, TextData, CameraZoom, VideoEffect, Marker } from '../types'
+import type { TimelineObject, ProjectAction, AudioData, VideoData, TextData, PhotoData, CameraZoom, VideoEffect, Marker } from '../types'
 import { keyframeColor } from '../lib/keyframes'
 import { zoomEnvelope } from '../lib/camera'
 import { effectEnvelope } from '../lib/effects'
@@ -1233,6 +1233,13 @@ export default function Timeline({
                       })()}
 
                       <span className="relative text-[10px] text-white px-1 truncate leading-10 pointer-events-none">
+                        {/* Animated image marker (spec 28 B12): ⟳ loops for the whole clip,
+                            → plays once and then holds the last frame. Absent for stills. */}
+                        {obj.type === 'photo' && (obj.data as PhotoData).animated ? (
+                          <span className="opacity-80">
+                            {(obj.data as PhotoData).loop === false ? '→' : '⟳'}{' '}
+                          </span>
+                        ) : null}
                         <span className="font-bold">{barLabel(obj)}</span>
                         {' '}
                         <span className="opacity-70">[{formatTime(obj.startTime)} - {formatTime(obj.startTime + obj.duration)}]</span>

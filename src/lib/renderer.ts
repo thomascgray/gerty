@@ -594,7 +594,11 @@ function drawObject(
   switch (obj.type) {
     case 'photo': {
       const data = obj.data as PhotoData
-      const img = imageCache.get(data.assetId)
+      // Animated images (spec 28) write their current frame under the OBJECT id, so two
+      // clips of the same GIF can sit at different points in the animation — exactly the
+      // keying `case 'video'` uses below. Stills are only ever cached by asset id, so
+      // they fall through to the same lookup as before.
+      const img = imageCache.get(obj.id) ?? imageCache.get(data.assetId)
       if (img) {
         ctx.globalAlpha = style.opacity * progress
         drawImageCover(ctx, img, bx, by, bw, bh)

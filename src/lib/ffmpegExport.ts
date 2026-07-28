@@ -1,4 +1,5 @@
 import type { Project, PhotoData, AudioData, VideoData } from '../types'
+import { createAnimatedExportSources } from './animatedImage'
 import { renderFrame, loadImage } from './renderer'
 import { resolveCamera } from './camera'
 import { resolveEffects } from './effects'
@@ -248,6 +249,9 @@ async function exportWithWebCodecs(
   // two clips sharing one asset never collide on the same cache slot).
   const imageCache = new Map<string, HTMLImageElement | HTMLVideoElement | VideoFrame | OffscreenCanvas>()
   const videoSources = new Map<string, VideoSource>() // keyed by object id
+  // Animated images (spec 28): one decoder per animated asset, one retained frame per
+  // clip, both keyed inside the helper. Empty when the project has none.
+  const animatedSources = await createAnimatedExportSources(objects, project.assets, getAssetBlob)
 
   for (const obj of objects) {
     if (obj.hidden) continue  // spec 14 R11: hidden clips are never drawn, so skip asset setup
@@ -327,6 +331,8 @@ async function exportWithWebCodecs(
       else { vs.el.pause(); vs.el.src = '' }
     }
     videoSources.clear()
+    // Animated-image frames are caller-owned, so they're closed here too.
+    animatedSources.destroy(imageCache)
   }
 
   try {
@@ -361,6 +367,10 @@ async function exportWithWebCodecs(
           imageCache.set(obj.id, vs.el)
         }
       }
+
+      // Animated images (spec 28): same contract — the frame for this global time goes
+      // into imageCache[obj.id]. Decodes only when the frame index actually changes.
+      await animatedSources.update(objects, globalTime, imageCache)
 
       // Composite all objects onto canvas (with the camera transform, spec 13, + render-wide effects,
       // spec 23 — export always renders the real camera + effects so the MP4 matches Live preview).
@@ -636,7 +646,10 @@ async function exportWithMediaRecorder(
 
   onProgress(0)
 
-  const imageCache = new Map<string, HTMLImageElement | HTMLVideoElement>()
+  const imageCache = new Map<string, HTMLImageElement | HTMLVideoElement | VideoFrame>()
+  // Animated images (spec 28) animate on this fallback path too — the still <img> loaded
+  // below stays as the B8 fallback for anything that can't be decoded.
+  const animatedSources = await createAnimatedExportSources(objects, project.assets, getAssetBlob)
   for (const obj of objects) {
     if (obj.hidden) continue  // spec 14 R11: hidden clips are never drawn, so skip asset setup
     if (obj.type === 'photo') {
@@ -752,6 +765,7 @@ async function exportWithMediaRecorder(
   for (let f = 0; f < totalFrames; f++) {
     if (signal?.aborted) {
       recorder.stop()
+      animatedSources.destroy(imageCache)
       if (audioCtx) await audioCtx.close()
       throw abortError()
     }
@@ -775,6 +789,8 @@ async function exportWithMediaRecorder(
       }
     }
 
+    await animatedSources.update(objects, globalTime, imageCache)
+
     renderFrame(ctx, objects, globalTime, { width, height }, imageCache, {
       camera: resolveCamera(project.zooms, globalTime),
       effects: resolveEffects(project.effects, globalTime),
@@ -790,6 +806,7 @@ async function exportWithMediaRecorder(
 
   recorder.stop()
   await recordingDone
+  animatedSources.destroy(imageCache)
 
   if (audioCtx) {
     await audioCtx.close()

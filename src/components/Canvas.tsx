@@ -15,6 +15,7 @@ import type {
   CameraZoom,
   TextData,
   VideoEffect,
+  AssetMeta,
 } from "../types";
 import { useCanvasRenderer } from "../hooks/useCanvasRenderer";
 import type { EditorOptions } from "../lib/renderer";
@@ -145,6 +146,9 @@ type CanvasProps = {
   onToggleDraw?: () => void;
   // Duplicate routes through App (not a raw dispatch) so the copy lands at the playhead + is selected.
   onDuplicate?: (objectId: string) => void;
+  // Asset metadata (spec 28): carries animated images' per-frame timings, measured once at
+  // import, so the renderer can pick the right frame without ever re-probing the blob.
+  assets?: AssetMeta[];
 };
 
 // === Constants ===
@@ -576,6 +580,7 @@ export default function Canvas({
   effects,
   onToggleDraw,
   onDuplicate,
+  assets,
 }: CanvasProps) {
   const renderCanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -749,6 +754,7 @@ export default function Canvas({
     width,
     height,
     editorOpts,
+    assets,
   );
 
   // Keep dragStateRef in sync for use in event handlers

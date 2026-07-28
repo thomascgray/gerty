@@ -86,8 +86,16 @@ export type Transition = {
   easing?: EasingKind        // optional; a kind-specific default is used when omitted
 }
 
+// Animated images (GIF / animated WebP / APNG) are still `photo` objects — only three
+// scalars are added (spec 28 B). The per-frame timing array deliberately lives ONCE on
+// AssetMeta, not here: DUPLICATE_OBJECT deep-clones `data`, so an array here would be
+// copied per clip. All the loop maths stays object-local; only the index lookup needs
+// the asset's timings. Absent fields ⇒ a plain still image, exactly as before.
 export type PhotoData = {
   assetId: string         // reference to asset in asset store
+  animated?: boolean      // set at import when the asset decodes to >1 frame
+  animationDuration?: number  // seconds, one full loop (animated only)
+  loop?: boolean          // absent = true. false = play once, then hold the last frame
 }
 
 export type ArrowData = {
@@ -366,7 +374,16 @@ export type AssetMeta = {
   filename: string
   mimeType: string
   size: number              // bytes
-  duration?: number         // seconds, for audio/video
+  duration?: number         // seconds — audio/video length, AND an animated image's loop
+                            // length (reused so App.handleAddExistingAsset's `duration ?? 5`
+                            // sizes an animated clip correctly with no special-casing)
+  animated?: boolean        // image assets only: decodes to >1 frame (spec 28 B)
+  frameDelaysMs?: number[]  // animated images only: per-frame delay in INTEGER milliseconds,
+                            // length = frameCount. Not cumulative float seconds — those
+                            // accumulate FP noise (0.30000000000000004) and serialise ~6x
+                            // larger for no precision gain. ONE copy per asset, so
+                            // duplicating a clip costs nothing. Persisted, so reopening a
+                            // project never re-runs the probe.
 }
 
 // === Project ===
