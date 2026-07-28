@@ -2,12 +2,14 @@
 
 #### A browser-based, open source, free to use video editor.
 
-- No login, no tracking, no ads
-- No "AI plz make me a video" bullshit
+- No login, no tracking, no ads, no AI, no bullshit
 - Code is fully open source
 - Import images, video clips, audio clips
-- Add custom arrows, text, with animated effects, keyframing
+- Add custom arrows, shapes, text, all with animated effects, keyframing
+- Add video-wide effects, like a camera zoom, sepia, vignette, film grain, etc.
 - Preview the video in real time. Export to MP4, with customisable quality/size
+
+### "What it lacks in features, it makes up for in not being dogshit" - me
 
 ## https://gerty.tomg.cool/ 👈 use it right now
 
@@ -30,18 +32,18 @@ https://github.com/user-attachments/assets/b078db2a-b289-4c58-b6ba-dfc386c7d952
 
 ## Keyboard shortcuts
 
-| Key                  | Action                                             |
-| -------------------- | -------------------------------------------------- |
-| Space                | Play / pause                                        |
-| V                    | Toggle camera **Live** / **Frame** view             |
-| M                    | Drop a marker at the playhead (works while playing) |
-| , / .                | Jump to previous / next marker                      |
-| S                    | Split the selected audio/video clip at the playhead |
-| H                    | Hide / show the selected object or zoom             |
-| Delete / Backspace   | Delete the selection                                |
-| Ctrl+Z               | Undo                                                |
-| Ctrl+Y / Ctrl+Shift+Z| Redo                                                |
-| Enter / Escape       | Finish the current drawing / deselect               |
+| Key                   | Action                                              |
+| --------------------- | --------------------------------------------------- |
+| Space                 | Play / pause                                        |
+| V                     | Toggle camera **Live** / **Frame** view             |
+| M                     | Drop a marker at the playhead (works while playing) |
+| , / .                 | Jump to previous / next marker                      |
+| S                     | Split the selected audio/video clip at the playhead |
+| H                     | Hide / show the selected object or zoom             |
+| Delete / Backspace    | Delete the selection                                |
+| Ctrl+Z                | Undo                                                |
+| Ctrl+Y / Ctrl+Shift+Z | Redo                                                |
+| Enter / Escape        | Finish the current drawing / deselect               |
 
 ## Privacy
 
