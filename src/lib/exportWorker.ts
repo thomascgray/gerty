@@ -1,4 +1,5 @@
 import type { PhotoData, VideoData, Project } from '../types'
+import { createAnimatedExportSources } from './animatedImage'
 import type { ExportWorkerRequest, ExportWorkerResponse, RenderedAudio, EncodeConfig } from './exportWorkerTypes'
 import { renderFrame } from './renderer'
 import { resolveCamera } from './camera'
@@ -86,6 +87,13 @@ async function runExport(
   // --- Load photos as ImageBitmap (by assetId) + one decoder per video object ---
   const imageCache = new Map<string, ImageBitmap | VideoFrame | OffscreenCanvas>()
   const videoDecoders = new Map<string, VideoFrameSource>() // keyed by object id (B3)
+  // Animated images (spec 28) — ImageDecoder works in workers, so this path is
+  // identical to the main-thread one and produces the same frames.
+  const animatedSources = await createAnimatedExportSources(
+    objects,
+    project.assets,
+    (assetId) => assetBlobs.get(assetId),
+  )
 
   for (const obj of objects) {
     if (obj.hidden) continue  // spec 14 R11: hidden clips are never drawn, so skip asset setup
@@ -172,6 +180,8 @@ async function runExport(
       }
     }
 
+    await animatedSources.update(objects, globalTime, imageCache)
+
     // Composite all objects onto canvas (with the camera transform, spec 13, + effects, spec 23)
     renderFrame(ctx, objects, globalTime, { width, height }, imageCache, {
       camera: resolveCamera(project.zooms, globalTime),
@@ -201,8 +211,11 @@ async function runExport(
   await videoEncoder.flush()
   videoEncoder.close()
 
-  // Clean up. VideoFrames are owned by their VideoFrameSource — destroy() closes
-  // them (closing here too would double-free). Only ImageBitmaps are ours to close.
+  // Clean up. Animated-image frames ARE caller-owned (unlike video-source frames), so
+  // they're closed and removed from the cache first.
+  animatedSources.destroy(imageCache)
+  // VideoFrames left here are owned by their VideoFrameSource — destroy() closes them
+  // (closing here too would double-free). Only ImageBitmaps are ours to close.
   for (const [, val] of imageCache) {
     if (val instanceof ImageBitmap) val.close()
   }

@@ -1,4 +1,5 @@
 import type { AssetMeta, AssetType } from '../types'
+import { probeAnimatedImage, sniffImageMime, type AnimatedImageInfo } from './animatedImage'
 
 const DB_NAME = 'gerty-assets'
 const DB_VERSION = 1
@@ -55,8 +56,18 @@ function idbGetAllKeys(db: IDBDatabase): Promise<string[]> {
   })
 }
 
-/** Store a blob in memory + IndexedDB. Returns asset metadata. */
-export async function storeAsset(file: File): Promise<{ meta: AssetMeta; blob: Blob }> {
+/**
+ * Store a blob in memory + IndexedDB. Returns asset metadata.
+ *
+ * Image assets are probed for animation (spec 28 B1) and the resulting per-frame
+ * timings recorded on the meta, so the animation survives a reload without ever
+ * re-decoding. Callers that already probed while staging (ImportModal) pass the
+ * result in via `animation` to avoid paying for it twice.
+ */
+export async function storeAsset(
+  file: File,
+  animation?: AnimatedImageInfo,
+): Promise<{ meta: AssetMeta; blob: Blob }> {
   const id = crypto.randomUUID()
   const type = detectAssetType(file.type)
   const blob = file as Blob
@@ -73,6 +84,15 @@ export async function storeAsset(file: File): Promise<{ meta: AssetMeta; blob: B
     filename: file.name,
     mimeType: file.type,
     size: file.size,
+  }
+
+  if (type === 'image') {
+    const info = animation ?? (await probeAnimatedImage(blob))
+    if (info.animated) {
+      meta.animated = true
+      meta.duration = info.duration        // reused as the loop length
+      meta.frameDelaysMs = info.frameDelaysMs
+    }
   }
 
   return { meta, blob }
@@ -202,3 +222,149 @@ export function getTotalAssetSize(): number {
 
 export const SIZE_WARN_PER_FILE = 50 * 1024 * 1024   // 50 MB
 export const SIZE_WARN_TOTAL = 500 * 1024 * 1024      // 500 MB
+
+// ---------------------------------------------------------------------------
+// Fetching an asset from a pasted URL (spec 28 A)
+// ---------------------------------------------------------------------------
+
+export type AssetFetchErrorKind =
+  | 'scheme'            // not http/https/data
+  | 'network'           // CORS block, DNS failure, offline — indistinguishable by design
+  | 'http-status'       // server said no
+  | 'unsupported-type'  // fetched fine, but it isn't media we can use
+  | 'too-large'         // Content-Length over the per-file cap
+
+/**
+ * A fetch failure carrying a message that is already fit to show the user —
+ * the error copy IS this feature's UX, so it lives here rather than in the modal.
+ */
+export class AssetFetchError extends Error {
+  kind: AssetFetchErrorKind
+  constructor(kind: AssetFetchErrorKind, message: string) {
+    super(message)
+    this.name = 'AssetFetchError'
+    this.kind = kind
+  }
+}
+
+const MIME_EXT: Record<string, string> = {
+  'image/png': 'png', 'image/apng': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif',
+  'image/webp': 'webp', 'image/avif': 'avif', 'image/svg+xml': 'svg',
+  'audio/mpeg': 'mp3', 'audio/wav': 'wav', 'audio/ogg': 'ogg', 'audio/webm': 'weba',
+  'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov',
+}
+
+const EXT_MIME: Record<string, string> = {
+  png: 'image/png', apng: 'image/apng', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+  gif: 'image/gif', webp: 'image/webp', avif: 'image/avif',
+  mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4',
+  mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime',
+}
+
+function isSupportedMime(mime: string): boolean {
+  return mime.startsWith('image/') || mime.startsWith('audio/') || mime.startsWith('video/')
+}
+
+/** Last path segment of a URL, query/hash stripped and percent-decoding undone. */
+function filenameFromUrl(url: URL): string {
+  const last = url.pathname.split('/').filter(Boolean).pop() ?? ''
+  try {
+    return decodeURIComponent(last)
+  } catch {
+    return last
+  }
+}
+
+/** True when a string looks like something we could fetch as an asset. */
+export function isFetchableUrl(text: string): boolean {
+  try {
+    const u = new URL(text)
+    return u.protocol === 'http:' || u.protocol === 'https:' || u.protocol === 'data:'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Fetch a pasted URL and return it as a File, ready to go through the exact same
+ * staging path as a dropped file (spec 28 A8) — so it lands in IndexedDB and the
+ * project never references the remote URL again.
+ *
+ * Deliberately plain `fetch` with default CORS (A7): `mode: 'no-cors'` yields an
+ * unreadable opaque blob, and loading via an <img> instead would TAINT THE CANVAS,
+ * which breaks VideoFrame(canvas) and would kill export for the entire project.
+ * Real bytes or a clear error.
+ */
+export async function fetchAssetFromUrl(rawUrl: string): Promise<File> {
+  let url: URL
+  try {
+    url = new URL(rawUrl)
+  } catch {
+    throw new AssetFetchError('scheme', "That doesn't look like a valid link.")
+  }
+
+  const scheme = url.protocol
+  if (scheme !== 'http:' && scheme !== 'https:' && scheme !== 'data:') {
+    throw new AssetFetchError(
+      'scheme',
+      scheme === 'blob:'
+        ? "That's a temporary link from another page and can't be read here — save the file and drag it in."
+        : `Links starting with "${scheme}" can't be loaded — save the file and drag it in.`,
+    )
+  }
+
+  let res: Response
+  try {
+    res = await fetch(url.href)
+  } catch {
+    // A CORS block and a genuine network failure are deliberately indistinguishable
+    // to page JS, so the message has to cover both without guessing.
+    throw new AssetFetchError(
+      'network',
+      "Couldn't load that link — the site may not allow other sites to read its files. Try saving it and dragging it in instead.",
+    )
+  }
+
+  if (!res.ok) {
+    throw new AssetFetchError('http-status', `That link returned an error (${res.status} ${res.statusText}).`)
+  }
+
+  // Pre-reject oversized downloads before reading the body — the only guard available
+  // before the bytes are already in memory (A9).
+  const declaredLength = Number(res.headers.get('content-length'))
+  if (Number.isFinite(declaredLength) && declaredLength > SIZE_WARN_PER_FILE) {
+    throw new AssetFetchError(
+      'too-large',
+      `That file is too big to load from a link (${(declaredLength / 1024 / 1024).toFixed(0)} MB) — download it and drag it in.`,
+    )
+  }
+
+  const headerMime = (res.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
+  const blob = await res.blob()
+
+  // Resolve a usable mime: a meaningful header wins, then the container's magic
+  // bytes, then the URL's file extension.
+  let mime = isSupportedMime(headerMime) ? headerMime : ''
+  if (!mime) mime = (await sniffImageMime(blob)) ?? ''
+  if (!mime) {
+    const ext = filenameFromUrl(url).split('.').pop()?.toLowerCase() ?? ''
+    mime = EXT_MIME[ext] ?? ''
+  }
+  if (!isSupportedMime(mime)) {
+    throw new AssetFetchError(
+      'unsupported-type',
+      headerMime
+        ? `That link is a ${headerMime} page, not an image, audio or video file.`
+        : "That link doesn't point at an image, audio or video file.",
+    )
+  }
+
+  // Name it after the URL where possible; otherwise synthesise one from the mime.
+  const ext = MIME_EXT[mime] ?? mime.split('/')[1] ?? 'bin'
+  let name = scheme === 'data:' ? '' : filenameFromUrl(url)
+  if (!name || !name.includes('.')) {
+    name = `pasted-${mime.split('/')[0]}.${ext}`
+  }
+
+  return new File([blob], name, { type: mime })
+}

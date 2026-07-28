@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import type { InteractionMode, TimelineObjectType, TimelineObject, ArrowData, FreehandData, VideoEffectKind } from '../types'
+import type { InteractionMode, TimelineObjectType, TimelineObject, ArrowData, FreehandData, VideoEffectKind, PhotoData } from '../types'
 import { createTimelineObject, createCameraZoom, createVideoEffect, createMarker } from '../types'
 import { getRememberedStyle, getRememberedData } from '../lib/objectDefaults'
 import { EFFECT_PRESETS, buildPresetEffects } from '../lib/effectPresets'
@@ -269,7 +269,12 @@ export default function App() {
     const name = asset.filename.replace(/\.[^.]+$/, '')
     let obj: TimelineObject
     if (asset.type === 'image') {
-      obj = createTimelineObject('photo', { assetId }, { startTime, duration: 5, x: 0, y: 0, width: 1, height: 1, name })
+      // Animated images (spec 28 B4) default to exactly one loop; stills keep the 5s default.
+      const photoData: PhotoData = asset.animated
+        ? { assetId, animated: true, animationDuration: asset.duration ?? 0 }
+        : { assetId }
+      const imageDuration = asset.animated && asset.duration ? asset.duration : 5
+      obj = createTimelineObject('photo', photoData, { startTime, duration: imageDuration, x: 0, y: 0, width: 1, height: 1, name })
     } else {
       // Regenerate the waveform from the cached blob (silent/unsupported media falls through).
       let waveform: number[] | undefined
@@ -650,6 +655,7 @@ export default function App() {
           effects={project.effects}
           onToggleDraw={handleToggleDrawSelected}
           onDuplicate={handleDuplicateObject}
+          assets={project.assets}
         />
           {/* Floating transport pill (spec 17 C) — centered over the canvas, in the render's bottom
               gutter. The container ignores pointer events; the pill re-enables them so it never

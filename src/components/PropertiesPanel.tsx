@@ -5,7 +5,7 @@ import {
   IconSparkles,
 } from '@tabler/icons-react'
 import type {
-  TimelineObject, ProjectAction, ArrowData, AudioData, VideoData, TextData, TextAlign,
+  TimelineObject, ProjectAction, ArrowData, AudioData, VideoData, TextData, TextAlign, PhotoData,
   AnimatableProperty, EasingKind, CameraZoom, VideoEffect, VideoEffectKind, VignetteShape,
   GradientMapPreset, ChannelSwapMapping,
 } from '../types'
@@ -600,6 +600,23 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
               className="w-full"
             />
           </Field>
+          {/* Animated images only (spec 28 B3/B12): the one playback control. Off = play
+              through once, then hold the last frame for the rest of the clip. `data` is
+              written WHOLE because UPDATE_OBJECT shallow-merges (a partial would drop assetId). */}
+          {obj.type === 'photo' && (obj.data as PhotoData).animated && (() => {
+            const pd = obj.data as PhotoData
+            return (
+              <Field label="Loop">
+                <input
+                  type="checkbox"
+                  checked={pd.loop !== false}
+                  onChange={(e) => update({ data: { ...pd, loop: e.target.checked } })}
+                  title="Repeat the animation for the whole clip. When off, it plays once and holds the last frame."
+                  className="accent-accent cursor-pointer"
+                />
+              </Field>
+            )
+          })()}
         </Accordion>
       )}
 
@@ -1305,19 +1322,7 @@ function EffectEditor({
               <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{Math.round(crt.scanline * 100)}%</span>
             </div>
           </Field>
-          <Field label="Zoom">
-            <div className="flex items-center gap-2 w-full">
-              <input
-                type="range" min={0} max={100} step={1}
-                value={Math.round(crt.zoom * 100)}
-                onChange={(e) => updateTransient({ crt: { ...crt, zoom: Number(e.target.value) / 100 } })}
-                onPointerUp={commit} onKeyUp={commit}
-                className="w-full"
-              />
-              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{Math.round(crt.zoom * 100)}%</span>
-            </div>
-          </Field>
-          <p className="text-[10px] text-subtle">Screen curvature, scanlines &amp; an RGB phosphor mask. Zoom crops into the centre so the curved edges hide the black bezel.</p>
+          <p className="text-[10px] text-subtle">Curved tube glass, scanlines &amp; an RGB phosphor mask. The picture is auto-fitted to the curve, so it always fills the frame — Intensity fades the whole look in and out.</p>
         </Accordion>
       )}
 
