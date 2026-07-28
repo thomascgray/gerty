@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import type { TimelineObject, ProjectAction, ArrowData, TextData, VideoData, TextAlign, CameraZoom } from '../types'
-import { effVal as kfEffVal, editPose } from '../lib/keyframes'
+import { effVal as kfEffVal, editPose, editPatch, resolvePose } from '../lib/keyframes'
 import { zoomHoldTime, zoomTargetPoseAt, editZoomPose } from '../lib/camera'
 import { clamp01 } from '../lib/easing'
 import { rememberObjectStyle, rememberObjectData } from '../lib/objectDefaults'
@@ -37,24 +37,36 @@ export function ContextToolbar({
   const obj = object
   const update = (updates: Partial<Omit<TimelineObject, 'id' | 'type'>>) =>
     dispatch({ type: 'UPDATE_OBJECT', objectId: obj.id, updates })
+  // Spec 29: routed through `editPatch` so the toolbar obeys the SAME base-vs-keyframe rule as the
+  // inspector — editing the colour of a colour-animated object lands on the keyframe rather than
+  // writing a base value the keyframes would immediately override. Remembering the last-used
+  // setting only applies when the edit actually landed on the base (a keyframe write returns
+  // `keyframes` alone).
+  const clipTime = Math.max(0, Math.min(globalTime - obj.startTime, obj.duration))
   const updateStyle = (s: Partial<TimelineObject['style']>) => {
-    const next = { ...obj.style, ...s }
-    update({ style: next })
-    rememberObjectStyle(obj.type, next)
+    const updates = editPatch(obj, { style: s as Record<string, unknown> }, clipTime)
+    update(updates)
+    if (updates.style) rememberObjectStyle(obj.type, updates.style)
   }
   const updateData = (d: Partial<TextData & ArrowData>, remember: Record<string, unknown>) => {
-    update({ data: { ...obj.data, ...d } as TimelineObject['data'] })
-    rememberObjectData(obj.type, remember)
+    const updates = editPatch(obj, { data: d as Record<string, unknown> }, clipTime)
+    update(updates)
+    if (updates.data) rememberObjectData(obj.type, remember)
   }
+
+  // Controls READ from the channel-resolved object so a swatch/toggle shows what's actually on
+  // screen at the playhead (identical reference when nothing animates). They WRITE through the
+  // closures above, which are bound to the raw object.
+  const view = resolvePose(obj, globalTime)
 
   return (
     <div className="flex items-center gap-0.5 rounded-lg border border-border bg-surface p-1 shadow-lg">
-      {obj.type === 'text' && <TextControls obj={obj} updateStyle={updateStyle} updateData={updateData} />}
+      {obj.type === 'text' && <TextControls obj={view} updateStyle={updateStyle} updateData={updateData} />}
       {obj.type === 'arrow' && (
-        <ArrowControls obj={obj} updateStyle={updateStyle} updateData={updateData} onToggleDraw={onToggleDraw} />
+        <ArrowControls obj={view} updateStyle={updateStyle} updateData={updateData} onToggleDraw={onToggleDraw} />
       )}
       {obj.type === 'freehand' && (
-        <FreehandControls obj={obj} updateStyle={updateStyle} onToggleDraw={onToggleDraw} />
+        <FreehandControls obj={view} updateStyle={updateStyle} onToggleDraw={onToggleDraw} />
       )}
       {(obj.type === 'photo' || obj.type === 'video') && (
         <MediaControls obj={obj} dispatch={dispatch} globalTime={globalTime} update={update} />

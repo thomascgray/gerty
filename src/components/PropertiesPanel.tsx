@@ -6,20 +6,23 @@ import {
 } from '@tabler/icons-react'
 import type {
   TimelineObject, ProjectAction, ArrowData, AudioData, VideoData, TextData, TextAlign, PhotoData,
-  AnimatableProperty, EasingKind, CameraZoom, VideoEffect, VideoEffectKind, VignetteShape,
-  GradientMapPreset, ChannelSwapMapping,
+  AnimatableProperty, AnimatableChannel, ChannelValue, TextEffect, EasingKind, CameraZoom,
+  VideoEffect, VideoEffectKind, VignetteShape, GradientMapPreset, ChannelSwapMapping,
 } from '../types'
 import {
-  KF_EPS, effVal as kfEffVal, editPose, addKeyframeAt, keyframeColor,
+  KF_EPS, effVal as kfEffVal, editPose, editChannel, toggleChannel, addKeyframeAt, keyframeColor,
+  channelValueAt, animatedChannels, declares, declaredChannels, channelsFor, CHANNELS_BY_KEY,
 } from '../lib/keyframes'
+import type { PanelSection } from '../lib/keyframes'
 import {
   zoomHoldTime, zoomTargetPoseAt, editZoomPose, addZoomKeyframeAt, activeZoomKeyframeIndex,
 } from '../lib/camera'
 import { clamp01 } from '../lib/easing'
+import { toHexColor as hexOf } from '../lib/color'
 import { srcIn, srcOut, sourceSpan, srcMin, srcMax, RATE_MIN, RATE_MAX } from '../lib/mediaTiming'
 import { rememberObjectStyle, rememberObjectData } from '../lib/objectDefaults'
 import {
-  Field, NumberInput, TransitionFields, TypeOnBar, EffectFields,
+  Field, NumberInput, TransitionFields, TypeOnBar, EffectFields, KeyframeDot,
   KeyframeTrack, KeyframeStatus, ZoomKeyframeTrack, MotionPicker, LeadInField, SELECT_CLS,
 } from './propertyControls'
 
@@ -58,13 +61,6 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
     dispatch({ type: 'UPDATE_OBJECT', objectId: obj.id, updates })
   }
 
-  const updateStyle = (styleUpdates: Partial<TimelineObject['style']>) => {
-    const nextStyle = { ...obj.style, ...styleUpdates }
-    update({ style: nextStyle })
-    // Remember these settings as the default for the next object of this type (feature: last-used).
-    rememberObjectStyle(obj.type, nextStyle)
-  }
-
   // Update type-specific data AND remember the given fields as new-object defaults. Only pass
   // fields that are safe to carry forward (never content/points/strokes/assetId).
   const updateData = (dataUpdates: Partial<TextData & ArrowData>, remember: Record<string, unknown>) => {
@@ -93,9 +89,65 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
 
   const kfs = obj.keyframes ?? []
   const activeIdx = kfs.findIndex((k) => Math.abs(k.time - clipTime) < KF_EPS)
-  // When parked on a keyframe, this accent color threads through the whole panel (ring, banner,
-  // pips) so it's unmistakable that edits land on that keyframe — matching the canvas selection box.
+  // When parked on a keyframe this accent color marks the banner + the sections that keyframe
+  // actually governs — matching the canvas selection box and the timeline diamond.
   const activeColor = activeIdx >= 0 ? keyframeColor(activeIdx) : null
+  const activeKf = activeIdx >= 0 ? kfs[activeIdx] : null
+
+  // --- Channels (spec 29) ---
+  // Any property in the registry can animate. Fields read their value at the playhead and write
+  // through `editChannel`, which decides whether the edit lands on the base value (the whole clip)
+  // or on a keyframe — see the rule in keyframes.ts.
+  const animated = animatedChannels(obj)
+  const chan = (c: AnimatableChannel) => channelValueAt(obj, c, clipTime)
+  const chanNum = (c: AnimatableChannel) => (chan(c) as number) ?? 0
+  const chanStr = (c: AnimatableChannel) => chan(c) as string | undefined
+
+  const setChan = (c: AnimatableChannel, v: ChannelValue, opts?: { transient?: boolean }) => {
+    const updates = editChannel(obj, { [c]: v }, clampTime(clipTime))
+    dispatch({
+      type: opts?.transient ? 'UPDATE_OBJECT_TRANSIENT' : 'UPDATE_OBJECT',
+      objectId: obj.id,
+      updates,
+    })
+    // Remember as the next-object default — but ONLY when the edit landed on the object's base
+    // value (a keyframe write produces `keyframes` alone), and never for one-off content.
+    if (updates.style) rememberObjectStyle(obj.type, updates.style)
+    const field = c.split('.')[1]
+    if (updates.data && field && c !== 'text.content') rememberObjectData(obj.type, { [field]: v })
+  }
+
+  // The ◆ next to a field: its state, and the click that opts the property in/out of animation.
+  const dotFor = (c: AnimatableChannel) => {
+    const spec = CHANNELS_BY_KEY[c]
+    const state = activeKf && declares(activeKf, c) ? 'active' : animated.has(c) ? 'animated' : 'off'
+    return (
+      <KeyframeDot
+        state={state}
+        color={activeColor ?? undefined}
+        label={spec?.label ?? c}
+        onClick={() => update(toggleChannel(obj, c, clampTime(clipTime)))}
+      />
+    )
+  }
+
+  // Section-level roll-up: a card is tinted when the ACTIVE keyframe governs something inside it,
+  // and shows a neutral ◇ when it merely contains something that animates. This is the fix for
+  // "the entire right-hand panel goes red" — only the sections a keyframe keeps light up.
+  const sectionState: Partial<Record<PanelSection, 'active' | 'animated'>> = {}
+  for (const spec of channelsFor(obj.type)) {
+    if (!animated.has(spec.key)) continue
+    if (activeKf && declares(activeKf, spec.key)) sectionState[spec.section] = 'active'
+    else if (!sectionState[spec.section]) sectionState[spec.section] = 'animated'
+  }
+  const secProps = (s: PanelSection) => ({
+    accent: sectionState[s] === 'active' ? activeColor : null,
+    marked: sectionState[s] === 'animated',
+  })
+  // What the active keyframe governs, for the banner ("Keyframe 2 — Position, Text").
+  const activeSections = activeKf
+    ? [...new Set(declaredChannels(activeKf).map((c) => CHANNELS_BY_KEY[c]?.section).filter(Boolean))]
+    : []
 
   // Keyframes are created ONLY here — never from editing/dragging.
   const addKeyframe = () => update({ keyframes: addKeyframeAt(obj, clampTime(clipTime)) })
@@ -116,19 +168,19 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
   const isVisual = obj.type !== 'audio'
 
   return (
-    <div
-      className="w-64 bg-surface border-l border-border p-4 overflow-y-auto text-sm"
-      style={activeColor ? { boxShadow: `inset 0 0 0 3px ${activeColor}` } : undefined}
-    >
-      {/* Editing-a-keyframe banner: loud, colored, and matches the canvas selection box + pip */}
+    <div className="w-64 bg-surface border-l border-border p-4 overflow-y-auto text-sm">
+      {/* Editing-a-keyframe banner. It names what the keyframe actually governs — the whole-panel
+          colour ring is gone (spec 29 R17); only those sections are tinted below. */}
       {activeColor && (
         <div
           className="mb-4 -mt-1 flex items-center gap-2 px-2 py-1.5 rounded text-white text-xs font-semibold"
           style={{ background: activeColor }}
         >
           <span className="text-sm leading-none">◆</span>
-          <span>Editing Keyframe {activeIdx + 1}</span>
-          <span className="ml-auto font-normal opacity-80">changes land here</span>
+          <span>Keyframe {activeIdx + 1}</span>
+          <span className="ml-auto font-normal opacity-80 truncate">
+            {activeSections.length ? activeSections.join(', ') : 'nothing set'}
+          </span>
         </div>
       )}
       {/* Name */}
@@ -219,22 +271,22 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
 
       {/* Position (not for audio — audio has no visual) */}
       {isVisual && (
-      <Accordion title="Position">
+      <Accordion title="Position" {...secProps('Position')}>
         <div className="grid grid-cols-2 gap-2">
-          <Field label="X">
+          <Field label="X" dot={dotFor('x')}>
             <NumberInput value={effVal('x')} step={0.01} onChange={(v) => dispatchPose('x', v, false)} />
           </Field>
-          <Field label="Y">
+          <Field label="Y" dot={dotFor('y')}>
             <NumberInput value={effVal('y')} step={0.01} onChange={(v) => dispatchPose('y', v, false)} />
           </Field>
-          <Field label="W">
+          <Field label="W" dot={dotFor('width')}>
             <NumberInput value={effVal('width')} step={0.01} min={0.01} onChange={(v) => dispatchPose('width', v, false)} />
           </Field>
-          <Field label="H">
+          <Field label="H" dot={dotFor('height')}>
             <NumberInput value={effVal('height')} step={0.01} min={0.01} onChange={(v) => dispatchPose('height', v, false)} />
           </Field>
         </div>
-        <Field label="Rotation">
+        <Field label="Rotation" dot={dotFor('rotation')}>
           <NumberInput
             value={Math.round(effVal('rotation') * 180 / Math.PI * 10) / 10}
             step={1}
@@ -346,6 +398,10 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
                 color={activeColor ?? undefined}
                 onChange={(v) => setKeyframeLeadIn(activeIdx, v)}
               />
+              <p className="text-[10px] text-subtle">
+                Anything you change while parked here is set on this keyframe — the ◆ next to a
+                field shows what it holds.
+              </p>
               {kfs.length > 1 && (
                 <button
                   onClick={() => applyEasingToAllKeyframes(kfs[activeIdx].easing)}
@@ -361,7 +417,7 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
           ) : (
             <p className="text-[10px] text-subtle mt-1">
               {kfs.length > 0
-                ? 'Jump to a ◆ keyframe to edit it. Moving the object at any other time drops a keyframe there so it passes through that pose; at the very start it moves the home pose instead.'
+                ? 'Jump to a ◆ keyframe and anything you change there — position, colour, the words — is set on that keyframe. At other times, moving the object drops a keyframe so it passes through that pose, while other properties change for the whole clip unless you ◆ them first.'
                 : 'Press + Keyframe to start animating from the current pose. Once animating, moving the object at other times adds keyframes automatically.'}
             </p>
           )}
@@ -406,16 +462,16 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
 
       {/* Style (for non-photo, non-audio, non-video objects) */}
       {obj.type !== 'photo' && obj.type !== 'audio' && obj.type !== 'video' && (
-        <Accordion title="Style">
-          <Field label="Color">
+        <Accordion title="Style" {...secProps('Style')}>
+          <Field label="Color" dot={dotFor('style.color')}>
             <input
               type="color"
-              value={obj.style.color}
-              onChange={(e) => updateStyle({ color: e.target.value })}
+              value={hexOf(chanStr('style.color'), obj.style.color)}
+              onChange={(e) => setChan('style.color', e.target.value)}
               className="w-8 h-6 bg-transparent border-none cursor-pointer"
             />
           </Field>
-          <Field label="Opacity">
+          <Field label="Opacity" dot={dotFor('opacity')}>
             <input
               type="range"
               min={0} max={100} step={1}
@@ -426,55 +482,51 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
               className="w-full"
             />
           </Field>
-          <Field label="Line width">
-            <NumberInput value={obj.style.lineWidth} min={1} max={20} step={1} onChange={(v) => updateStyle({ lineWidth: v })} />
+          <Field label="Line width" dot={dotFor('style.lineWidth')}>
+            <NumberInput value={chanNum('style.lineWidth')} min={1} max={20} step={1} onChange={(v) => setChan('style.lineWidth', v)} />
           </Field>
           {obj.type === 'text' && (obj.data as TextData).autoSize === false && (
-            <Field label="Font size">
-              <NumberInput value={obj.style.fontSize ?? 32} min={8} max={200} step={1} onChange={(v) => updateStyle({ fontSize: v })} />
+            <Field label="Font size" dot={dotFor('style.fontSize')}>
+              <NumberInput value={chanNum('style.fontSize')} min={8} max={200} step={1} onChange={(v) => setChan('style.fontSize', v)} />
             </Field>
           )}
-          {obj.type === 'text' && (
-            <Field label="Background">
-              <div className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={(obj.data as TextData).background != null}
-                  onChange={(e) => {
-                    const data = obj.data as TextData
-                    const next = e.target.checked ? (data.background ?? '#000000') : undefined
-                    updateData({ background: next }, { background: next })
-                  }}
-                  className="accent-accent cursor-pointer"
-                />
-                {(obj.data as TextData).background != null && (
+          {obj.type === 'text' && (() => {
+            const bg = chanStr('text.background')
+            return (
+              <Field label="Background" dot={dotFor('text.background')}>
+                <div className="flex items-center gap-2">
                   <input
-                    type="color"
-                    value={(obj.data as TextData).background ?? '#000000'}
-                    onChange={(e) => updateData({ background: e.target.value }, { background: e.target.value })}
-                    className="w-8 h-6 bg-transparent border-none cursor-pointer"
+                    type="checkbox"
+                    checked={bg != null}
+                    onChange={(e) => setChan('text.background', e.target.checked ? (bg ?? '#000000') : undefined)}
+                    className="accent-accent cursor-pointer"
                   />
-                )}
-              </div>
-            </Field>
-          )}
+                  {bg != null && (
+                    <input
+                      type="color"
+                      value={hexOf(bg, '#000000')}
+                      onChange={(e) => setChan('text.background', e.target.value)}
+                      className="w-8 h-6 bg-transparent border-none cursor-pointer"
+                    />
+                  )}
+                </div>
+              </Field>
+            )
+          })()}
           {/* Corner radius rounds the background panel; only meaningful when a background is set. */}
-          {obj.type === 'text' && (obj.data as TextData).background != null && (
-            <Field label="Corner radius">
+          {obj.type === 'text' && chanStr('text.background') != null && (
+            <Field label="Corner radius" dot={dotFor('text.cornerRadius')}>
               <div className="flex items-center gap-2 w-full">
                 <input
                   type="range"
                   min={0} max={200} step={1}
-                  value={(obj.data as TextData).cornerRadius ?? 0}
-                  onChange={(e) => {
-                    const cornerRadius = Number(e.target.value)
-                    updateData({ cornerRadius }, { cornerRadius })
-                  }}
-                  onDoubleClick={() => updateData({ cornerRadius: 0 }, { cornerRadius: 0 })}
+                  value={Math.round(chanNum('text.cornerRadius'))}
+                  onChange={(e) => setChan('text.cornerRadius', Number(e.target.value))}
+                  onDoubleClick={() => setChan('text.cornerRadius', 0)}
                   className="w-full"
                 />
                 <span className="text-[10px] text-subtle tabular-nums w-8 text-right">
-                  {(obj.data as TextData).cornerRadius ?? 0}
+                  {Math.round(chanNum('text.cornerRadius'))}
                 </span>
               </div>
             </Field>
@@ -484,18 +536,32 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
 
       {/* Text-specific */}
       {obj.type === 'text' && (
-        <Accordion title="Text">
+        <Accordion title="Text" {...secProps('Text')}>
+          <div className="flex items-center gap-1 mb-1">
+            {dotFor('text.content')}
+            <span className="text-muted text-xs">
+              {animated.has('text.content')
+                ? (activeKf && declares(activeKf, 'text.content') ? 'Words on this keyframe' : 'Words here')
+                : 'Words'}
+            </span>
+          </div>
           <textarea
-            value={(obj.data as TextData).content}
-            onChange={(e) => update({ data: { ...(obj.data as TextData), content: e.target.value } })}
+            value={String(chan('text.content') ?? '')}
+            onChange={(e) => setChan('text.content', e.target.value)}
             rows={3}
             placeholder="Enter text…"
             className="w-full bg-surface-muted text-fg text-xs px-2 py-1 rounded border border-border focus:border-accent outline-none resize-y"
           />
-          <Field label="Font">
+          {animated.has('text.content') && (
+            <p className="text-[10px] text-subtle">
+              The words change over this clip — they wipe from the old text to the new one. Set a
+              keyframe's motion to <span className="text-muted">Instant</span> for a hard cut.
+            </p>
+          )}
+          <Field label="Font" dot={dotFor('style.fontFamily')}>
             <select
-              value={obj.style.fontFamily ?? 'sans-serif'}
-              onChange={(e) => updateStyle({ fontFamily: e.target.value })}
+              value={chanStr('style.fontFamily') ?? 'sans-serif'}
+              onChange={(e) => setChan('style.fontFamily', e.target.value)}
               className={SELECT_CLS}
             >
               <option value="sans-serif">Sans</option>
@@ -513,10 +579,10 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
               className="accent-accent cursor-pointer"
             />
           </Field>
-          <Field label="Align">
+          <Field label="Align" dot={dotFor('text.align')}>
             <select
-              value={(obj.data as TextData).align ?? 'center'}
-              onChange={(e) => updateData({ align: e.target.value as TextAlign }, { align: e.target.value })}
+              value={(chanStr('text.align') ?? 'center') as TextAlign}
+              onChange={(e) => setChan('text.align', e.target.value as TextAlign)}
               className={SELECT_CLS}
             >
               <option value="left">Left</option>
@@ -525,19 +591,19 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
               <option value="justify">Justify</option>
             </select>
           </Field>
-          <Field label="Bold">
+          <Field label="Bold" dot={dotFor('style.fontWeight')}>
             <input
               type="checkbox"
-              checked={(obj.style.fontWeight ?? 'bold') === 'bold'}
-              onChange={(e) => updateStyle({ fontWeight: e.target.checked ? 'bold' : 'normal' })}
+              checked={(chanStr('style.fontWeight') ?? 'bold') === 'bold'}
+              onChange={(e) => setChan('style.fontWeight', e.target.checked ? 'bold' : 'normal')}
               className="accent-accent cursor-pointer"
             />
           </Field>
-          <Field label="Italic">
+          <Field label="Italic" dot={dotFor('style.fontStyle')}>
             <input
               type="checkbox"
-              checked={(obj.style.fontStyle ?? 'normal') === 'italic'}
-              onChange={(e) => updateStyle({ fontStyle: e.target.checked ? 'italic' : 'normal' })}
+              checked={(chanStr('style.fontStyle') ?? 'normal') === 'italic'}
+              onChange={(e) => setChan('style.fontStyle', e.target.checked ? 'italic' : 'normal')}
               className="accent-accent cursor-pointer"
             />
           </Field>
@@ -546,17 +612,21 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
 
       {/* Text effects (spec 19): one effect per text object; "None" removes it. */}
       {obj.type === 'text' && (
-        <Accordion title="Effects">
+        <Accordion title="Effects" {...secProps('Effects')}>
+          <div className="flex items-center gap-1">
+            {dotFor('text.effect')}
+            <span className="text-muted text-xs">Effect</span>
+          </div>
           <EffectFields
-            value={(obj.data as TextData).effect}
-            onChange={(effect) => updateData({ effect }, { effect })}
+            value={chan('text.effect') as TextEffect | undefined}
+            onChange={(effect) => setChan('text.effect', effect)}
           />
         </Accordion>
       )}
 
       {/* Arrow-specific */}
       {obj.type === 'arrow' && (
-        <Accordion title="Arrow">
+        <Accordion title="Arrow" {...secProps('Arrow')}>
           <Field label="Moving head">
             <input
               type="checkbox"
@@ -565,31 +635,35 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
               className="accent-accent cursor-pointer"
             />
           </Field>
-          <Field label="Curvature">
+          <Field label="Curvature" dot={dotFor('arrow.curvature')}>
             <div className="flex items-center gap-2 w-full">
               <input
                 type="range"
                 min={-100} max={100} step={1}
-                value={Math.round(((obj.data as ArrowData).curvature ?? 0) * 100)}
-                onChange={(e) => {
-                  const curvature = Number(e.target.value) / 100
-                  updateData({ curvature }, { curvature })
-                }}
-                onDoubleClick={() => updateData({ curvature: 0 }, { curvature: 0 })}
+                value={Math.round(chanNum('arrow.curvature') * 100)}
+                onChange={(e) => setChan('arrow.curvature', Number(e.target.value) / 100)}
+                onDoubleClick={() => setChan('arrow.curvature', 0)}
                 className="w-full"
               />
               <span className="text-[10px] text-subtle tabular-nums w-8 text-right">
-                {((obj.data as ArrowData).curvature ?? 0).toFixed(1)}
+                {chanNum('arrow.curvature').toFixed(1)}
               </span>
             </div>
+          </Field>
+          <Field label="Head size" dot={dotFor('arrow.headSize')}>
+            <NumberInput
+              value={chanNum('arrow.headSize')}
+              min={0} max={200} step={1}
+              onChange={(v) => setChan('arrow.headSize', v)}
+            />
           </Field>
         </Accordion>
       )}
 
       {/* Photo/video opacity */}
       {(obj.type === 'photo' || obj.type === 'video') && (
-        <Accordion title="Style">
-          <Field label="Opacity">
+        <Accordion title="Style" {...secProps('Style')}>
+          <Field label="Opacity" dot={dotFor('opacity')}>
             <input
               type="range"
               min={0} max={100} step={1}
@@ -1498,10 +1572,25 @@ const SECTION_ICONS: Record<string, React.ReactNode> = {
   'Comic Ink': <IconSparkles size={15} stroke={2} />,
 }
 
-function Accordion({ title, children, defaultOpen = false }: { title: string; children: React.ReactNode; defaultOpen?: boolean }) {
+/**
+ * `accent` (spec 29 R17): the colour of the keyframe under the playhead, set only when THAT
+ * keyframe governs a property in this card — so the tint tells you where your edits will land.
+ * `marked`: something in this card animates, but not on the active keyframe (a neutral ◇), so a
+ * collapsed card still advertises that it holds animation.
+ */
+function Accordion({ title, children, defaultOpen = false, accent = null, marked = false }: {
+  title: string
+  children: React.ReactNode
+  defaultOpen?: boolean
+  accent?: string | null
+  marked?: boolean
+}) {
   const [open, setOpen] = useState(defaultOpen)
   return (
-    <div className="mb-2 overflow-hidden rounded-lg border border-border bg-surface-muted/40">
+    <div
+      className="mb-2 overflow-hidden rounded-lg border bg-surface-muted/40"
+      style={accent ? { borderColor: accent, boxShadow: `inset 3px 0 0 0 ${accent}` } : { borderColor: 'var(--border)' }}
+    >
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
@@ -1509,6 +1598,11 @@ function Accordion({ title, children, defaultOpen = false }: { title: string; ch
       >
         <span className="text-subtle">{SECTION_ICONS[title]}</span>
         <span className="flex-1 text-[11px] font-semibold uppercase tracking-wider text-fg">{title}</span>
+        {(accent || marked) && (
+          <span className="text-[10px] leading-none" style={accent ? { color: accent } : undefined}>
+            {accent ? '◆' : '◇'}
+          </span>
+        )}
         <IconChevronDown size={14} stroke={2} className={`text-subtle transition-transform ${open ? '' : '-rotate-90'}`} />
       </button>
       {open && <div className="space-y-2 px-2.5 pb-2.5 pt-0.5">{children}</div>}

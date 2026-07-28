@@ -6,7 +6,8 @@ import {
   drawCircle,
   drawFreehand,
 } from './annotations'
-import { resolveRenderPose } from './keyframes'
+import { resolveRenderPose, textMorphAt } from './keyframes'
+import type { TextMorph } from './keyframes'
 import { isIdentityCamera } from './camera'
 import { effectsToFilterString } from './effects'
 import { applyShaderEffects, isShaderEffect } from './glEffects'
@@ -64,6 +65,9 @@ export function renderFrame(
 
     // Resolve keyframes + enter/exit transitions (identity when the object has neither)
     const obj = resolveRenderPose(rawObj, globalTime)
+    // Spec 29: an in-flight text-content change. Computed from the RAW object — the resolved copy
+    // has already had its content written to the held value, which would hide the outgoing string.
+    const morph = rawObj.type === 'text' ? textMorphAt(rawObj, elapsed) : null
 
     ctx.save()
     if (cam && !rawObj.ignoreCamera) {
@@ -74,16 +78,16 @@ export function renderFrame(
 
     // Active drawing object: full opacity, no ghost
     if (activeDrawingObjectId === obj.id) {
-      drawObject(ctx, obj, 1.0, w, h, imageCache, elapsed)
+      drawObject(ctx, obj, 1.0, w, h, imageCache, elapsed, undefined, morph)
     } else if (editorMode && progress < 1 && obj.type !== 'photo') {
       // Ghost preview: two-pass rendering for editor mode.
       // Pass 1: ghost of full shape at reduced opacity
       const ghostStyle = { ...obj.style, opacity: obj.style.opacity * GHOST_ALPHA }
-      drawObject(ctx, obj, 1.0, w, h, imageCache, elapsed, ghostStyle)
+      drawObject(ctx, obj, 1.0, w, h, imageCache, elapsed, ghostStyle, morph)
       // Pass 2: animated portion at full opacity
-      drawObject(ctx, obj, progress, w, h, imageCache, elapsed)
+      drawObject(ctx, obj, progress, w, h, imageCache, elapsed, undefined, morph)
     } else {
-      drawObject(ctx, obj, progress, w, h, imageCache, elapsed)
+      drawObject(ctx, obj, progress, w, h, imageCache, elapsed, undefined, morph)
     }
 
     ctx.restore()
@@ -567,6 +571,7 @@ function drawObject(
   imageCache: Map<string, HTMLImageElement | HTMLVideoElement | ImageBitmap | VideoFrame | OffscreenCanvas>,
   time: number,   // clip-relative seconds (globalTime - startTime); only drawText uses it (spec 19)
   styleOverride?: ObjectStyle,
+  morph?: TextMorph | null,  // spec 29: an in-flight text-content change (text objects only)
 ) {
   const style = styleOverride ?? obj.style
   // Compute bounding box in pixel space
@@ -609,7 +614,7 @@ function drawObject(
       drawArrow(ctx, obj.data as ArrowData, style, progress, bx, by, bw, bh, scaleFactor)
       break
     case 'text':
-      drawText(ctx, obj.data as TextData, style, progress, bx, by, bw, bh, scaleFactor, time)
+      drawText(ctx, obj.data as TextData, style, progress, bx, by, bw, bh, scaleFactor, time, morph)
       break
     case 'rectangle':
       drawRectangle(ctx, style, progress, bx, by, bw, bh, scaleFactor)

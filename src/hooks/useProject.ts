@@ -1,7 +1,10 @@
 import { useReducer, useCallback, useEffect, useRef } from 'react'
-import type { Project, ProjectAction, TimelineObject, AudioData, VideoData, Keyframe } from '../types'
+import type {
+  Project, ProjectAction, TimelineObject, AudioData, VideoData, Keyframe,
+  AnimatableChannel, ChannelValue,
+} from '../types'
 import { createDefaultProject } from '../types'
-import { poseAt, KF_EPS } from '../lib/keyframes'
+import { animatedChannels, channelValueAt, KF_EPS } from '../lib/keyframes'
 import { srcIn, srcOut, sourceSpan } from '../lib/mediaTiming'
 import { saveProject, loadProject } from '../lib/projectStorage'
 import { loadCanvasSize, saveCanvasSize } from '../lib/canvasSizePref'
@@ -41,14 +44,17 @@ function splitObject(obj: TimelineObject, globalTime: number): [TimelineObject, 
   }
 
   // Continuity across the cut (R10.3): when the object is keyframed and there isn't already a
-  // keyframe on the cut, pin the interpolated pose at the split onto the end of the left half and
+  // keyframe on the cut, pin the interpolated values at the split onto the end of the left half and
   // the start of the right half — otherwise the right half would restart its tween from the base
-  // (home) pose and pop. Pinning both boundaries guarantees the pose matches on each side.
+  // (home) value and pop. Pinning both boundaries guarantees they match on each side.
+  // Spec 29: pins EVERY animated channel, not just the pose, so a colour/text change spanning the
+  // cut is continuous too. structuredClone keeps non-scalar values (a text effect) independent.
   if (kfs.length > 0 && atKfs.length === 0) {
-    const atPose = poseAt(obj, splitOffset)
+    const props: Partial<Record<AnimatableChannel, ChannelValue>> = {}
+    for (const c of animatedChannels(obj)) props[c] = channelValueAt(obj, c, splitOffset)
     const boundaryEasing = kfs.find((k) => k.time > splitOffset + KF_EPS)?.easing ?? 'linear'
-    leftKfs.push({ time: splitOffset, pose: { ...atPose }, easing: boundaryEasing })
-    rightKfs.unshift({ time: 0, pose: { ...atPose }, easing: boundaryEasing })
+    leftKfs.push({ time: splitOffset, props: structuredClone(props), easing: boundaryEasing })
+    rightKfs.unshift({ time: 0, props: structuredClone(props), easing: boundaryEasing })
   }
 
   // Each half collapses its recoverable-source window (sourceMin/sourceMax) to its own played span,
