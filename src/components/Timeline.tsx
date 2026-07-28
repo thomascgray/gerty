@@ -1,7 +1,7 @@
 import { useRef, useCallback, useState, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import type { TimelineObject, ProjectAction, AudioData, VideoData, TextData, PhotoData, CameraZoom, VideoEffect, Marker } from '../types'
-import { keyframeColor } from '../lib/keyframes'
+import { keyframeColor, declaredChannels, POSE_CHANNELS, CHANNELS_BY_KEY } from '../lib/keyframes'
 import { zoomEnvelope } from '../lib/camera'
 import { effectEnvelope } from '../lib/effects'
 import { sourceSpan, srcIn, srcOut, srcMin, srcMax } from '../lib/mediaTiming'
@@ -1309,17 +1309,24 @@ export default function Timeline({
                       let maxTime = i < kfs.length - 1 ? kfs[i + 1].time - 0.05 : obj.duration
                       if (minTime > maxTime) { const m = (minTime + maxTime) / 2; minTime = m; maxTime = m }
                       const isActive = dragState?.kind === 'move-keyframe' && dragState.objectId === obj.id && dragState.kfIndex === i
+                      // Spec 29 R22: a keyframe that changes only style/text (no pose) draws HOLLOW,
+                      // so "this one recolours / changes the words" reads without opening the panel.
+                      const chans = declaredChannels(k)
+                      const posey = chans.some((c) => POSE_CHANNELS.has(c))
+                      const what = [...new Set(chans.map((c) => CHANNELS_BY_KEY[c]?.label).filter(Boolean))].join(', ')
                       return (
                         <div
                           key={i}
                           className="absolute top-1/2 w-3 h-3 border border-black/60 z-20 cursor-ew-resize pointer-events-auto"
                           style={{
                             left: timeToX(k.time),
-                            background: keyframeColor(i),
+                            background: posey ? keyframeColor(i) : 'transparent',
+                            borderColor: posey ? undefined : keyframeColor(i),
+                            borderWidth: posey ? undefined : 2,
                             transform: 'translate(-50%, -50%) rotate(45deg)',
                             boxShadow: isActive ? '0 0 0 2px #fff' : 'none',
                           }}
-                          title={`Keyframe ${i + 1} @ ${k.time.toFixed(2)}s — drag to retime`}
+                          title={`Keyframe ${i + 1} @ ${k.time.toFixed(2)}s${what ? ` — ${what}` : ''} — drag to retime`}
                           onMouseDown={(e) => {
                             e.stopPropagation()
                             onSelectObject(obj.id)

@@ -58,18 +58,48 @@ export type EasingKind =
   | 'easeOutBack'
   | 'spring'
 
-// Object properties that can be keyframed. `opacity` maps to style.opacity; the rest are top-level.
+// The object's POSE properties. `opacity` maps to style.opacity; the rest are top-level.
 export type AnimatableProperty = 'x' | 'y' | 'width' | 'height' | 'rotation' | 'opacity'
 
-// A full pose snapshot — every keyframe captures all of these; anything that changed tweens.
+// A full pose snapshot. LEGACY shape: pre-spec-29 keyframes stored exactly this and nothing else.
 export type KeyframePose = Record<AnimatableProperty, number>
 
+// === Animatable channels (spec 29) ===
+// The full key space of keyframable properties, addressed by a flat dotted key so ONE sparse map
+// covers pose + style + type-specific data. (Nesting would force three parallel merge paths in the
+// resolver and three badge maps in the panel.) Each key's label, owning panel section, interpolation
+// rule, object types, and read/write accessors live in ONE table: `CHANNELS` in lib/keyframes.ts.
+export type AnimatableChannel =
+  // pose — the legacy six
+  | AnimatableProperty
+  // style
+  | 'style.color' | 'style.lineWidth' | 'style.fontSize'
+  | 'style.fontFamily' | 'style.fontWeight' | 'style.fontStyle'
+  // text data
+  | 'text.content' | 'text.background' | 'text.cornerRadius' | 'text.align' | 'text.effect'
+  // arrow data
+  | 'arrow.curvature' | 'arrow.headSize'
+
+// A channel's stored value. Only TextEffect is non-scalar (see the `effect` interpolation rule).
+// An ABSENT optional value (no text background, no text effect) is meaningful and must survive a
+// save: it is STORED as `null` (JSON.stringify drops undefined-valued keys, which would silently
+// un-declare the channel) and normalised back to `undefined` on read by `channelOf`.
+export type ChannelValue = number | string | boolean | TextEffect | null | undefined
+
+// A keyframe is a SPARSE declaration (spec 29): it governs only the properties listed in `props`,
+// and each property resolves as an INDEPENDENT track. A property animates iff at least one keyframe
+// declares it; otherwise it reads its static base value off the object for the whole clip.
+//
+// Back-compat: pre-spec-29 keyframes stored a whole-pose `pose` and no `props`. Those are read as
+// "declares all six pose channels", so old projects/.gerty imports animate exactly as before with no
+// migration step. New keyframes only ever write `props`; `pose` is never written again.
 export type Keyframe = {
-  time: number         // clip-relative seconds (relative to startTime) when this pose is reached
-  pose: KeyframePose   // full snapshot of the object's pose at this keyframe
+  time: number         // clip-relative seconds (relative to startTime) when these values are reached
+  pose?: KeyframePose  // LEGACY whole-pose snapshot; read-only fallback, never written by new code
+  props?: Partial<Record<AnimatableChannel, ChannelValue>>  // the sparse declaration set
   easing: EasingKind   // curve for the segment ARRIVING at this keyframe (from the previous one)
   leadIn?: number      // spec 21: seconds the arriving move takes, ending at `time`. Holds the
-                       // previous pose before (time - leadIn). Undefined = fill the whole gap (legacy).
+                       // previous value before (time - leadIn). Undefined = fill the whole gap.
 }
 
 // === Enter / Exit transitions ===

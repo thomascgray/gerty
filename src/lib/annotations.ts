@@ -235,6 +235,13 @@ export function fitText(
   return { fontSize: lo, lines: wrapText(ctx, content, maxW) }
 }
 
+// Spec 29: an in-flight text-content change. The outgoing and incoming strings are drawn
+// superimposed with a soft left-to-right alpha front, so the old letters fade out as the front
+// passes them and the new ones fade in just behind. `u` is already eased by the keyframe engine,
+// so `instant` easing (u pinned at 0 until the keyframe's time) reads as a hard cut for free.
+export type TextMorphDraw = { from: string; to: string; u: number }
+const MORPH_FEATHER = 0.25 // fraction of the string the fade front spans
+
 export function drawText(
   ctx: CanvasRenderingContext2D,
   data: TextData,
@@ -246,8 +253,11 @@ export function drawText(
   bh: number,
   scaleFactor: number,
   time = 0,   // clip-relative seconds; drives Tier 2 animated effects (spec 19). 0 = static.
+  morph?: TextMorphDraw | null,
 ) {
-  const full = data.content ?? ''
+  // While morphing, the INCOMING string owns the layout and the reveal; the outgoing one is drawn
+  // over it at the same font size (see below) so the type height stays put through the swap.
+  const full = morph ? morph.to : (data.content ?? '')
   const fontFamily = style.fontFamily ?? 'sans-serif'
   const fontWeight = style.fontWeight ?? 'bold'
   const fontStyle = style.fontStyle ?? 'normal'
@@ -266,28 +276,55 @@ export function drawText(
 
   // Layout is computed from the FULL text (independent of the reveal), so letters type on in
   // place without the block reflowing/jumping.
-  let fontSize: number
-  let lines: WrappedLine[]
-  if (autoSize) {
-    ({ fontSize, lines } = fitText(ctx, full, fontOf, availW, availH))
-  } else {
-    fontSize = (style.fontSize ?? 32) * scaleFactor
-    ctx.font = fontOf(fontSize)
-    lines = wrapText(ctx, full, availW)
+  const layoutOf = (text: string): { fontSize: number; lines: WrappedLine[] } => {
+    if (autoSize) return fitText(ctx, text, fontOf, availW, availH)
+    const fs = (style.fontSize ?? 32) * scaleFactor
+    ctx.font = fontOf(fs)
+    return { fontSize: fs, lines: wrapText(ctx, text, availW) }
   }
-  ctx.font = fontOf(fontSize)
-  const lineHeight = fontSize * TEXT_LINE_RATIO
+
+  // Each string keeps its OWN natural layout (auto-fit size + line breaks); the size difference is
+  // morphed by drawing each at a uniform SCALE instead of re-wrapping it. Scaling rather than
+  // re-fitting matters twice over: neither string reflows mid-morph, and the drawn size is exactly
+  // each string's natural size at its own end of the morph — so there is no jump entering or
+  // leaving the transition. (Re-fitting both to a shared size, as this first did, made the
+  // outgoing text visibly snap the instant the morph began.)
+  const inLayout = layoutOf(full)
+  const outLayout = morph ? layoutOf(morph.from) : null
+  const targetSize = outLayout && morph
+    ? outLayout.fontSize + (inLayout.fontSize - outLayout.fontSize) * morph.u
+    : inLayout.fontSize
+
+  ctx.font = fontOf(inLayout.fontSize)
 
   const leftX = bx + padding
   const rightX = bx + bw - padding
   const centerX = bx + bw / 2
   const boxCenterY = by + bh / 2
-  const totalH = lines.length * lineHeight
-  const firstLineY = boxCenterY - totalH / 2 + lineHeight / 2
+  // Scale anchor: keeps the aligned edge put while the type size morphs.
+  const anchorX = align === 'right' ? rightX : align === 'left' ? leftX : centerX
 
   // Typewriter reveal: round so progress=1 shows everything and progress=0 shows nothing.
-  const totalChars = lines.reduce((s, l) => s + l.text.length, 0)
-  const revealChars = Math.max(0, Math.min(totalChars, Math.round(progress * totalChars)))
+  const revealOf = (ls: WrappedLine[]) => {
+    const total = ls.reduce((s, l) => s + l.text.length, 0)
+    return { total, reveal: Math.max(0, Math.min(total, Math.round(progress * total))) }
+  }
+  const { reveal: revealChars } = revealOf(inLayout.lines)
+
+  /**
+   * Per-glyph alpha for the morph wipe. A soft front at `u*(1+FEATHER)` sweeps the normalized
+   * glyph axis; the outgoing string fades to 0 as it passes, the incoming one rises to 1 behind it.
+   * u=0 ⇒ only the old string; u=1 ⇒ the front has cleared every glyph ⇒ only the new one.
+   */
+  const morphAlpha = (() => {
+    if (!morph) return null
+    const front = morph.u * (1 + MORPH_FEATHER)
+    return (incoming: boolean, i: number, n: number) => {
+      const p = n > 1 ? i / (n - 1) : 0
+      const passed = Math.max(0, Math.min(1, (front - p) / MORPH_FEATHER))
+      return incoming ? passed : 1 - passed
+    }
+  })()
 
   // Background fills the whole object box (its full bbox), not just the glyphs — so it reads as a
   // solid panel behind the text regardless of the text's length or alignment.
@@ -397,18 +434,32 @@ export function drawText(
     ctx.strokeStyle = outline.color
   }
 
-  // Paint one run of text at (x, baseY). Per-glyph when waving; a single fillText otherwise.
-  // `charBase` is the run's first glyph index within the full text (for wave phase continuity).
-  const paintRun = (text: string, x: number, baseY: number, charBase: number): number => {
-    if (waveFn) {
+  // Alpha the glyph loop multiplies into — captured AFTER the effect switch so `pulse`'s
+  // oscillation is included, and restored between glyphs so per-glyph alpha can't accumulate.
+  const baseAlpha = ctx.globalAlpha
+
+  // Paint one run of text at (x, baseY). Per-glyph when waving or morphing; one fillText otherwise.
+  // `charBase` is the run's first glyph index within the full text (wave phase / morph front).
+  const paintRun = (
+    text: string, x: number, baseY: number, charBase: number,
+    alphaFn: ((i: number) => number) | null,
+  ): number => {
+    if (waveFn || alphaFn) {
       let cx = x
       for (let i = 0; i < text.length; i++) {
         const ch = text[i]
-        const gy = baseY + waveFn(charBase + i)
+        const gi = charBase + i
+        const gy = baseY + (waveFn ? waveFn(gi) : 0)
+        if (alphaFn) {
+          const a = alphaFn(gi)
+          if (a <= 0.001) { cx += ctx.measureText(ch).width; continue }
+          ctx.globalAlpha = baseAlpha * a
+        }
         if (outline) ctx.strokeText(ch, cx, gy)
         ctx.fillText(ch, cx, gy)
         cx += ctx.measureText(ch).width
       }
+      if (alphaFn) ctx.globalAlpha = baseAlpha
       return cx
     }
     if (outline) ctx.strokeText(text, x, baseY)
@@ -416,10 +467,29 @@ export function drawText(
     return x + ctx.measureText(text).width
   }
 
-  const renderLines = () => {
-    let remaining = revealChars
+  // Draw one laid-out string. `alphaFn` (morph only) fades individual glyphs by their index; the
+  // layout is drawn at its natural size under a uniform scale toward `targetSize` (1 when no morph
+  // is running, so the whole transform collapses away and output is unchanged).
+  const renderText = (
+    layout: { fontSize: number; lines: WrappedLine[] },
+    reveal: number,
+    alphaFn: ((i: number) => number) | null,
+  ) => {
+    const ls = layout.lines
+    const lineHeight = layout.fontSize * TEXT_LINE_RATIO
+    const k = targetSize / layout.fontSize
+    ctx.save()
+    ctx.font = fontOf(layout.fontSize)
+    if (Math.abs(k - 1) > 1e-6) {
+      ctx.translate(anchorX, boxCenterY)
+      ctx.scale(k, k)
+      ctx.translate(-anchorX, -boxCenterY)
+    }
+    // Each string is vertically centered on its own line count (they may wrap differently).
+    const firstLineY = boxCenterY - (ls.length * lineHeight) / 2 + lineHeight / 2
+    let remaining = reveal
     let lineStart = 0 // running glyph index at the start of each line (full text)
-    lines.forEach((l, i) => {
+    ls.forEach((l, i) => {
       const y = firstLineY + i * lineHeight
       const take = Math.max(0, Math.min(remaining, l.text.length))
       remaining -= l.text.length
@@ -436,7 +506,7 @@ export function drawText(
         let x = leftX
         let charAt = thisLineStart
         for (const w of words) {
-          paintRun(w, x, y, charAt)
+          paintRun(w, x, y, charAt, alphaFn)
           x += ctx.measureText(w).width + extra
           charAt += w.length + 1 // + the space that split() consumed
         }
@@ -446,9 +516,22 @@ export function drawText(
       // Align by the FULL line width so revealing letters stay put; draw the visible substring.
       const fullWidth = ctx.measureText(l.text).width
       const sx = align === 'right' ? rightX - fullWidth : align === 'center' ? centerX - fullWidth / 2 : leftX
-      paintRun(l.text.slice(0, take), sx, y, thisLineStart)
+      paintRun(l.text.slice(0, take), sx, y, thisLineStart, alphaFn)
     })
+    ctx.restore()
   }
+
+  // One paint of the whole text block. Mid-morph that's the outgoing string fading out UNDER the
+  // incoming one fading in, both scaling toward the incoming size, so it reads as the words
+  // transforming rather than one block being swapped for another.
+  const renderLines = morphAlpha && outLayout
+    ? () => {
+        const out = revealOf(outLayout.lines)
+        const inn = revealOf(inLayout.lines)
+        renderText(outLayout, out.reveal, (i) => morphAlpha(false, i, out.total))
+        renderText(inLayout, inn.reveal, (i) => morphAlpha(true, i, inn.total))
+      }
+    : () => renderText(inLayout, revealChars, null)
 
   ctx.fillStyle = fillStyle
   if (effect?.kind === 'glitch') {
@@ -506,7 +589,10 @@ function drawGlitchText(
   const fps = 6 + effect.speed * 8         // glitch update rate; speed scales how frantic it is
   const rnd = mulberry32(hashInt(Math.floor(time * fps)) || 1)
 
-  const split = (2 + amt * 5) * scaleFactor * (0.7 + 0.6 * rnd()) // chromatic offset, px
+  // Chromatic offset, px. Scaled by `amt` so amount=0 is genuinely inert — spec 29 ramps an
+  // appearing/vanishing glitch through 0, and the old constant floor (2px of RGB fringing even at
+  // amount 0) made that hand-over pop. Identical at amount=1; subtler at partial amounts.
+  const split = (2 + amt * 5) * amt * scaleFactor * (0.7 + 0.6 * rnd())
   const sy = (rnd() - 0.5) * amt * 2 * scaleFactor
   const jx = (rnd() - 0.5) * amt * 3 * scaleFactor               // whole-block jitter
   const jy = (rnd() - 0.5) * amt * 1.5 * scaleFactor

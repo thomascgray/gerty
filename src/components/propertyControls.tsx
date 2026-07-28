@@ -171,12 +171,53 @@ export function Section({ title, children }: { title: string; children: React.Re
   )
 }
 
-export function Field({ label, children }: { label: string; children: React.ReactNode }) {
+export function Field({ label, children, dot }: { label: string; children: React.ReactNode; dot?: React.ReactNode }) {
   return (
     <div className="flex items-center justify-between gap-2">
-      <label className="text-muted text-xs shrink-0">{label}</label>
+      <label className="text-muted text-xs shrink-0 flex items-center gap-1">
+        {dot}
+        {label}
+      </label>
       {children}
     </div>
+  )
+}
+
+/**
+ * Per-property keyframe indicator + opt-in toggle (spec 29 R10/R18). Three states:
+ *   - `off`      — this property is static for the whole clip. Click to start animating it here.
+ *   - `animated` — it animates somewhere on this object, but the playhead isn't on a keyframe
+ *                  that governs it (so edits here land on the base or create a keyframe).
+ *   - `active`   — the keyframe under the playhead governs it; edits land on THAT keyframe, and the
+ *                  dot wears the keyframe's colour so it matches the panel banner and canvas box.
+ * This is what replaces "the entire inspector turns red": you can see exactly which properties a
+ * keyframe keeps, and which ones animate at all.
+ */
+export function KeyframeDot({
+  state, color, label, onClick,
+}: {
+  state: 'off' | 'animated' | 'active'
+  color?: string
+  label: string
+  onClick: () => void
+}) {
+  const title = state === 'active'
+    ? `${label} is set by this keyframe — click to remove it from the keyframe`
+    : state === 'animated'
+      ? `${label} animates on this object — click to pin its current value as a keyframe here`
+      : `${label} is the same for the whole clip — click to start animating it from here`
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      className={`shrink-0 text-[10px] leading-none cursor-pointer transition-opacity ${
+        state === 'active' ? '' : state === 'animated' ? 'text-fg opacity-90 hover:opacity-100' : 'text-subtle opacity-30 hover:opacity-90'
+      }`}
+      style={state === 'active' ? { color } : undefined}
+    >
+      {state === 'active' ? '◆' : '◇'}
+    </button>
   )
 }
 

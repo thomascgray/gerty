@@ -24,6 +24,7 @@ import { segmentControlPoint, fitText } from "../lib/annotations";
 import {
   resolvePose,
   editPose,
+  editChannel,
   activeKeyframeIndex,
   keyframeColor,
 } from "../lib/keyframes";
@@ -805,15 +806,22 @@ export default function Canvas({
     if (id) {
       const obj = objects.find((o) => o.id === id);
       if (obj && obj.type === "text" && editValue !== editOriginalRef.current) {
+        // Spec 29: routed through editChannel, exactly like the inspector's Words field — editing
+        // the text is editing the text, so it must land on the keyframe under the playhead (and
+        // flip that keyframe's ◆) rather than quietly rewriting the base for the whole clip.
         dispatch({
           type: "UPDATE_OBJECT",
           objectId: id,
-          updates: { data: { ...(obj.data as TextData), content: editValue } },
+          updates: editChannel(
+            obj,
+            { "text.content": editValue },
+            Math.max(0, Math.min(globalTime - obj.startTime, obj.duration)),
+          ),
         });
       }
     }
     setEditingTextId(null);
-  }, [editingTextId, objects, editValue, dispatch]);
+  }, [editingTextId, objects, editValue, dispatch, globalTime]);
 
   // --- Draw overlay ---
   const drawOverlay = useCallback(() => {
