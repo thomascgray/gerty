@@ -1322,19 +1322,7 @@ function EffectEditor({
               <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{Math.round(crt.scanline * 100)}%</span>
             </div>
           </Field>
-          <Field label="Zoom">
-            <div className="flex items-center gap-2 w-full">
-              <input
-                type="range" min={0} max={100} step={1}
-                value={Math.round(crt.zoom * 100)}
-                onChange={(e) => updateTransient({ crt: { ...crt, zoom: Number(e.target.value) / 100 } })}
-                onPointerUp={commit} onKeyUp={commit}
-                className="w-full"
-              />
-              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{Math.round(crt.zoom * 100)}%</span>
-            </div>
-          </Field>
-          <p className="text-[10px] text-subtle">Screen curvature, scanlines &amp; an RGB phosphor mask. Zoom crops into the centre so the curved edges hide the black bezel.</p>
+          <p className="text-[10px] text-subtle">Curved tube glass, scanlines &amp; an RGB phosphor mask. The picture is auto-fitted to the curve, so it always fills the frame — Intensity fades the whole look in and out.</p>
         </Accordion>
       )}
 

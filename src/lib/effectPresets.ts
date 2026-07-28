@@ -64,7 +64,7 @@ export const EFFECT_PRESETS: EffectPreset[] = [
     name: 'Retro TV',
     description: 'Old television set: CRT curvature and scanlines over VHS chroma bleed and tracking.',
     effects: [
-      { kind: 'crt', options: { intensity: 1, crt: { curvature: 0.35, scanline: 0.5, zoom: 0.35 } } },
+      { kind: 'crt', options: { intensity: 1, crt: { curvature: 0.35, scanline: 0.5 } } },
       { kind: 'vhs', options: { intensity: 0.7, vhs: { bleed: 0.4, noise: 0.4 } } },
     ],
   },

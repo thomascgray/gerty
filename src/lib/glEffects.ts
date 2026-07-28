@@ -98,6 +98,12 @@ function ensureInit(w: number, h: number): boolean {
     srcTex?.resize(w, h)
     fboA?.resize(w, h)
     fboB?.resize(w, h)
+    // regl caches the drawing-buffer size and only refreshes it in poll(); without this the default
+    // viewport (used for the FINAL pass, which targets the canvas rather than an FBO) keeps the size
+    // the GL context was created at. Changing the project aspect ratio would then squeeze the frame
+    // into a stale rectangle and leave the rest of the canvas transparent — the "render area gets cut
+    // off / the picture moves" bug. Costs nothing when the size hasn't changed.
+    regl?.poll()
   }
   return !!regl
 }
@@ -284,11 +290,17 @@ void main() {
   gl_FragColor = vec4(mix(src.rgb, q, uIntensity), src.a);
 }`
 
-// CRT: barrel-distorted UV, scanlines, RGB phosphor mask, subtle flicker + a Zoom that crops the
-// black bezel the curvature creates. Intensity does NOT crossfade with the source (that ghosts a
-// distorted image over an undistorted one) — instead it scales the effect params, so it fades to a
-// clean identity at 0 and reaches full strength at 1, with no doubling. uResolution → pixel-space
-// scanlines/mask; uTime → flicker.
+// CRT: curved tube glass, scanlines, RGB phosphor stripes, edge falloff + a slow brightness flicker.
+// Intensity does NOT crossfade with the source (that ghosts a distorted image over an undistorted
+// one) — instead it scales the effect params, so it fades to a clean identity at 0 and reaches full
+// strength at 1, with no doubling. uTime → flicker.
+//
+// Two properties keep it predictable to author (there is deliberately NO zoom/crop control):
+//  * ASPECT-CORRECTED barrel — the bulge is round on screen, so a 16:9 frame curves like a square one
+//    does instead of being stretched flat horizontally.
+//  * AUTO-FIT — the displaced UVs are rescaled so the corners land exactly on the frame edge. The
+//    picture always fills the frame: raising Intensity can never open a black bezel, and there is
+//    nothing to "zoom in past". The trade is a few percent of crop at the middle of each edge.
 const FRAG_CRT = `
 precision mediump float;
 varying vec2 vUv;
@@ -298,32 +310,34 @@ uniform float uTime;
 uniform vec2 uResolution;
 uniform float uCurvature;
 uniform float uScanline;
-uniform float uZoom;
-vec2 barrel(vec2 uv, float amt) {
-  vec2 cc = uv - 0.5;
-  float d = dot(cc, cc);
-  return uv + cc * d * amt;
-}
+const float SCANLINE_COUNT = 240.0;    // fixed line count => same look at any project resolution
+const float PHOSPHOR_STRIPES = 480.0;  // R/G/B stripes across the frame (160 triads)
 void main() {
-  float amt = uIntensity;
-  float zoom = uZoom * amt;
-  // Zoom in toward the centre first (crops the bezel), then barrel-distort.
-  vec2 uv = (vUv - 0.5) * (1.0 - zoom * 0.5) + 0.5;
-  uv = barrel(uv, uCurvature * amt * 0.6);
-  vec3 crt;
-  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-    crt = vec3(0.0); // bezel
-  } else {
-    crt = texture2D(uSrc, uv).rgb;
-    float line = 0.5 + 0.5 * sin(uv.y * uResolution.y * 3.14159);
-    crt *= 1.0 - uScanline * amt * 0.6 * line;
-    float col = mod(uv.x * uResolution.x, 3.0);
-    vec3 mask = col < 1.0 ? vec3(1.0, 0.7, 0.7) : col < 2.0 ? vec3(0.7, 1.0, 0.7) : vec3(0.7, 0.7, 1.0);
-    crt *= mix(vec3(1.0), mask, 0.5 * amt);
-    crt *= 1.0 + 0.03 * amt * sin(uTime * 12.0); // flicker
-    crt *= 1.0 + 0.15 * amt;                      // compensate mask/scanline darkening
-  }
-  gl_FragColor = vec4(crt, texture2D(uSrc, vUv).a);
+  float amt = clamp(uIntensity, 0.0, 1.0);
+  float k = uCurvature * amt * 0.35;
+
+  float aspect = uResolution.x / max(uResolution.y, 1.0);
+  vec2 c = vUv - 0.5;
+  vec2 p = c * vec2(aspect, 1.0);
+  float r2 = dot(p, p) / (0.25 * (aspect * aspect + 1.0)); // 0 at centre, 1 at the corners
+  vec2 uv = c * (1.0 + r2 * k) / (1.0 + k) + 0.5;          // barrel, then auto-fit to the frame
+
+  vec3 col = texture2D(uSrc, uv).rgb;
+
+  // Scanlines follow the curve (they use the distorted uv) so the tube reads as glass, not a decal.
+  float line = 0.5 + 0.5 * sin(uv.y * SCANLINE_COUNT * 6.2831853);
+  col *= 1.0 - uScanline * amt * 0.45 * line;
+
+  // RGB phosphor stripes (screen-space, so they stay crisp under the curve).
+  float s = mod(floor(vUv.x * PHOSPHOR_STRIPES), 3.0);
+  vec3 mask = s < 1.0 ? vec3(1.0, 0.75, 0.75) : s < 2.0 ? vec3(0.75, 1.0, 0.75) : vec3(0.75, 0.75, 1.0);
+  col *= mix(vec3(1.0), mask, 0.5 * amt);
+
+  col *= 1.0 - 0.45 * r2 * r2 * uCurvature * amt;      // tube edge falloff
+  col *= 1.0 + 0.02 * amt * sin(uTime * 12.0);         // slow flicker
+  col *= 1.0 + amt * (0.25 * uScanline + 0.09);        // offset the scanline/mask darkening
+
+  gl_FragColor = vec4(col, texture2D(uSrc, vUv).a);
 }`
 
 // VHS: horizontal chroma bleed + per-line wobble + MANY random flickering tracking lines + a wide
@@ -514,12 +528,11 @@ const REGISTRY: Record<ShaderEffectKind, EffectDef> = {
     frag: FRAG_CRT,
     extraUniforms: {
       ...uTime, ...uResolution,
-      uCurvature: fromProp('curvature'), uScanline: fromProp('scanline'), uZoom: fromProp('zoom'),
+      uCurvature: fromProp('curvature'), uScanline: fromProp('scanline'),
     },
     props: (e) => ({
       curvature: e.crt?.curvature ?? 0.3,
       scanline: e.crt?.scanline ?? 0.5,
-      zoom: e.crt?.zoom ?? 0.3,
     }),
   },
   vhs: {

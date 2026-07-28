@@ -295,7 +295,8 @@ export type DitherParams = { levels: number; scale: number }  // levels 2–6, s
 
 // Composite "look" shaders (spec 25 batch 2). CRT/VHS are TIME-ANIMATED (flicker/noise/wobble driven
 // by a uTime uniform derived from globalTime → deterministic, preview==export).
-export type CrtParams = { curvature: number; scanline: number; zoom: number } // curvature 0–1 barrel, scanline 0–1 darkness, zoom 0–1 crops the black bezel
+// curvature 0–1 barrel (auto-fitted to the frame, so it never opens a bezel), scanline 0–1 darkness
+export type CrtParams = { curvature: number; scanline: number }
 export type VhsParams = { bleed: number; noise: number }        // bleed 0–1 chroma split, noise 0–1 tracking
 export type HalftoneParams = { cell: number; angle: number }    // cell px (2–16), screen angle degrees
 export type ComicParams = { levels: number; thickness: number } // posterized base levels (2–8) + ink line thickness (0.5–3)
@@ -524,7 +525,7 @@ export function createVideoEffect(kind: VideoEffectKind, options?: Partial<Omit<
     effect.dither = options?.dither ?? { levels: 3, scale: 2 }
   }
   if (kind === 'crt') {
-    effect.crt = options?.crt ?? { curvature: 0.3, scanline: 0.5, zoom: 0.3 }
+    effect.crt = options?.crt ?? { curvature: 0.3, scanline: 0.5 }
   }
   if (kind === 'vhs') {
     effect.vhs = options?.vhs ?? { bleed: 0.5, noise: 0.4 }
