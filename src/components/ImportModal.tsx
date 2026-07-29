@@ -291,7 +291,9 @@ export default function ImportModal({
             name: baseName,
           })
         );
-        timeOffset += duration;
+        // Images do NOT advance the stagger: several photos imported together land on
+        // separate lanes (assigned in App.addObjects) but share a start time, so they
+        // stack as layers rather than playing as a slideshow. Audio/video still stagger.
       } else if (item.type === "audio") {
         const duration = item.duration ?? 5;
         let waveform: number[] | undefined;

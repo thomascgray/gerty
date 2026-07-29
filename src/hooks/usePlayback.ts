@@ -52,8 +52,10 @@ export function usePlayback(project: Project) {
       setGlobalTime((prev) => {
         const next = prev + delta * playbackSpeedRef.current
         if (next >= totalDurationRef.current) {
+          // Park on the last frame rather than rewinding — the playhead stays where
+          // playback ended so you can inspect/edit the final frame.
           setIsPlaying(false)
-          return 0
+          return totalDurationRef.current
         }
         return next
       })
@@ -65,15 +67,25 @@ export function usePlayback(project: Project) {
     return () => cancelAnimationFrame(rafRef.current)
   }, [isPlaying])
 
+  // Playback parks on the last frame when it finishes, so hitting Play from there rewinds
+  // to the start instead of instantly re-ending.
+  const rewindIfAtEnd = useCallback(() => {
+    setGlobalTime((t) => (t >= totalDurationRef.current ? 0 : t))
+  }, [])
+
   const play = useCallback(() => {
     if (totalDurationRef.current <= 0) return
+    rewindIfAtEnd()
     setIsPlaying(true)
-  }, [])
+  }, [rewindIfAtEnd])
   const pause = useCallback(() => setIsPlaying(false), [])
   const togglePlayback = useCallback(() => {
     if (totalDurationRef.current <= 0) return
-    setIsPlaying((p) => !p)
-  }, [])
+    setIsPlaying((p) => {
+      if (!p) rewindIfAtEnd()
+      return !p
+    })
+  }, [rewindIfAtEnd])
 
   const seek = useCallback(
     (time: number) => {
