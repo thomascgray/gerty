@@ -20,6 +20,14 @@ const GROUPS: HotkeyGroup[] = [
     ],
   },
   {
+    title: 'Timeline',
+    items: [
+      { keys: ['Scroll'], label: 'Scroll lanes', desc: 'Wheel up/down over the timeline scrolls vertically through the lanes.' },
+      { keys: ['Shift', 'Scroll'], label: 'Pan through time', desc: 'Hold Shift and scroll to pan the timeline left/right through time. The playhead stays put.' },
+      { keys: ['Ctrl', 'Scroll'], label: 'Zoom timeline', desc: 'Hold Ctrl (or Cmd) and scroll to zoom the timeline in and out, anchored on the cursor. Trackpad pinch also zooms.' },
+    ],
+  },
+  {
     title: 'Markers',
     items: [
       { keys: ['M'], label: 'Add marker', desc: 'Drop a marker at the playhead. Works while playing, so you can tap to the beat.' },

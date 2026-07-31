@@ -449,6 +449,7 @@ export type ProjectAction =
   | { type: 'COMMIT_TRANSIENT' }
   | { type: 'DUPLICATE_OBJECT'; objectId: string; newId?: string; startTime?: number }
   | { type: 'SPLIT_OBJECT'; objectId: string; globalTime: number }  // spec 14 R10: atomic slice-at-playhead (one undo entry)
+  | { type: 'CONVERT_TO_AUDIO'; objectId: string }  // drop a video's picture, keep it as an audio-only clip
   | { type: 'REMOVE_LANE'; lane: number }
   | { type: 'ADD_ASSETS'; assets: AssetMeta[] }
   | { type: 'ADD_ZOOM'; zoom: CameraZoom }

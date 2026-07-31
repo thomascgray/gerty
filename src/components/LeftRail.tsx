@@ -5,14 +5,12 @@ import { EFFECT_PRESETS } from '../lib/effectPresets'
 import {
   IconPhoto, IconTypography, IconShape, IconZoomScan,
   IconArrowUpRight, IconScribble, IconPhotoPlus, IconMusic, IconSquare, IconCircle,
-  IconChevronLeft, IconChevronRight, IconSparkles,
-  IconContrast, IconDroplet, IconColorSwatch, IconVignette, IconGrain, IconMovie,
-  IconRainbow, IconContrast2, IconSunHigh, IconFlare, IconAperture, IconGridDots, IconGradienter,
-  IconStack2, IconCircleHalf2, IconArrowsExchange, IconColorPicker, IconGridPattern,
-  IconDeviceTv, IconDeviceTvOld, IconCircles, IconBrush,
-  IconWand, IconSkull, IconSunset2, IconBinoculars, IconVideo, IconMoon,
+  IconChevronLeft, IconChevronRight, IconFilters,
+  IconContrast, IconMovie, IconDeviceTv, IconBrush,
+  IconPrism, IconSkull, IconSunset2, IconBinoculars, IconVideo, IconMoon,
   type IconProps,
 } from '@tabler/icons-react'
+import { EFFECT_ICON } from './effectIcons'
 
 type TablerIcon = ComponentType<IconProps>
 type RailSection = 'media' | 'text' | 'elements' | 'effects'
@@ -44,7 +42,7 @@ const SECTIONS: { id: RailSection; label: string; Icon: TablerIcon }[] = [
   { id: 'media', label: 'Media', Icon: IconPhoto },
   { id: 'text', label: 'Text', Icon: IconTypography },
   { id: 'elements', label: 'Elements', Icon: IconShape },
-  { id: 'effects', label: 'Effects', Icon: IconSparkles },
+  { id: 'effects', label: 'Effects', Icon: IconFilters },
 ]
 
 /**
@@ -101,9 +99,10 @@ export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateObjec
         </button>
       </div>
 
-      {/* Content pane */}
-      {open && (
-        <div className="w-52 flex flex-col min-h-0 shrink-0">
+      {/* Content pane — always mounted and width-animated so collapse/expand slides rather than
+          snapping. Outer clips; inner keeps its fixed width so content doesn't reflow mid-slide. */}
+      <div className={`h-full overflow-hidden transition-[width] duration-200 ease-out ${open ? 'w-52' : 'w-0'}`}>
+        <div className="w-52 h-full flex flex-col min-h-0 shrink-0">
           {section === 'media' && (
             <div className="flex-1 min-h-0 overflow-y-auto">
               <MediaSection assets={assets} onAddMedia={onAddMedia} onAddAsset={onAddAsset} />
@@ -119,10 +118,10 @@ export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateObjec
           {section === 'elements' && (
             <div className="flex-1 min-h-0 overflow-y-auto">
               <SimpleSection title="Elements" items={[
+                { label: 'Pen', Icon: IconScribble, onClick: () => onCreateObject('freehand') },
                 { label: 'Arrow', Icon: IconArrowUpRight, onClick: () => onCreateObject('arrow') },
                 { label: 'Rectangle', Icon: IconSquare, onClick: () => onCreateObject('rectangle') },
                 { label: 'Circle', Icon: IconCircle, onClick: () => onCreateObject('circle') },
-                { label: 'Pen', Icon: IconScribble, onClick: () => onCreateObject('freehand') },
               ]} />
             </div>
           )}
@@ -132,36 +131,36 @@ export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateObjec
             <div className="flex-1 min-h-0 overflow-y-auto">
             <SimpleSection title="Effects" items={[
               { label: 'Camera zoom', Icon: IconZoomScan, onClick: onCreateZoom },
-              { label: 'Black & white', Icon: IconContrast, onClick: () => onCreateEffect('grayscale') },
-              { label: 'Sepia', Icon: IconDroplet, onClick: () => onCreateEffect('sepia') },
-              { label: 'Invert', Icon: IconColorSwatch, onClick: () => onCreateEffect('invert') },
-              { label: 'Vignette', Icon: IconVignette, onClick: () => onCreateEffect('vignette') },
-              { label: 'Film grain', Icon: IconGrain, onClick: () => onCreateEffect('grain') },
-              { label: 'Old film', Icon: IconMovie, onClick: () => onCreateEffect('oldfilm') },
+              { label: 'Black & white', Icon: EFFECT_ICON.grayscale, onClick: () => onCreateEffect('grayscale') },
+              { label: 'Sepia', Icon: EFFECT_ICON.sepia, onClick: () => onCreateEffect('sepia') },
+              { label: 'Invert', Icon: EFFECT_ICON.invert, onClick: () => onCreateEffect('invert') },
+              { label: 'Vignette', Icon: EFFECT_ICON.vignette, onClick: () => onCreateEffect('vignette') },
+              { label: 'Film grain', Icon: EFFECT_ICON.grain, onClick: () => onCreateEffect('grain') },
+              { label: 'Old film', Icon: EFFECT_ICON.oldfilm, onClick: () => onCreateEffect('oldfilm') },
               // spec 24 (first slice)
-              { label: 'Hue shift', Icon: IconRainbow, onClick: () => onCreateEffect('hue') },
-              { label: 'Contrast crush', Icon: IconContrast2, onClick: () => onCreateEffect('contrast') },
-              { label: 'Bleach bypass', Icon: IconSunHigh, onClick: () => onCreateEffect('bleach') },
-              { label: 'Light leak', Icon: IconFlare, onClick: () => onCreateEffect('lightleak') },
-              { label: 'Chromatic split', Icon: IconAperture, onClick: () => onCreateEffect('chromatic') },
-              { label: 'Pixelate', Icon: IconGridDots, onClick: () => onCreateEffect('pixelate') },
-              { label: 'Gradient map', Icon: IconGradienter, onClick: () => onCreateEffect('gradientmap') },
-              { label: 'Posterize', Icon: IconStack2, onClick: () => onCreateEffect('posterize') },
-              { label: 'Duotone', Icon: IconCircleHalf2, onClick: () => onCreateEffect('threshold') },
-              { label: 'Channel swap', Icon: IconArrowsExchange, onClick: () => onCreateEffect('channelswap') },
-              { label: 'Colour isolate', Icon: IconColorPicker, onClick: () => onCreateEffect('colorisolate') },
-              { label: 'Dither', Icon: IconGridPattern, onClick: () => onCreateEffect('dither') },
-              { label: 'CRT', Icon: IconDeviceTv, onClick: () => onCreateEffect('crt') },
-              { label: 'VHS', Icon: IconDeviceTvOld, onClick: () => onCreateEffect('vhs') },
-              { label: 'Halftone', Icon: IconCircles, onClick: () => onCreateEffect('halftone') },
-              { label: 'Comic ink', Icon: IconBrush, onClick: () => onCreateEffect('comic') },
+              { label: 'Hue shift', Icon: EFFECT_ICON.hue, onClick: () => onCreateEffect('hue') },
+              { label: 'Contrast crush', Icon: EFFECT_ICON.contrast, onClick: () => onCreateEffect('contrast') },
+              { label: 'Bleach bypass', Icon: EFFECT_ICON.bleach, onClick: () => onCreateEffect('bleach') },
+              { label: 'Light leak', Icon: EFFECT_ICON.lightleak, onClick: () => onCreateEffect('lightleak') },
+              { label: 'Chromatic split', Icon: EFFECT_ICON.chromatic, onClick: () => onCreateEffect('chromatic') },
+              { label: 'Pixelate', Icon: EFFECT_ICON.pixelate, onClick: () => onCreateEffect('pixelate') },
+              { label: 'Gradient map', Icon: EFFECT_ICON.gradientmap, onClick: () => onCreateEffect('gradientmap') },
+              { label: 'Posterize', Icon: EFFECT_ICON.posterize, onClick: () => onCreateEffect('posterize') },
+              { label: 'Duotone', Icon: EFFECT_ICON.threshold, onClick: () => onCreateEffect('threshold') },
+              { label: 'Channel swap', Icon: EFFECT_ICON.channelswap, onClick: () => onCreateEffect('channelswap') },
+              { label: 'Colour isolate', Icon: EFFECT_ICON.colorisolate, onClick: () => onCreateEffect('colorisolate') },
+              { label: 'Dither', Icon: EFFECT_ICON.dither, onClick: () => onCreateEffect('dither') },
+              { label: 'CRT', Icon: EFFECT_ICON.crt, onClick: () => onCreateEffect('crt') },
+              { label: 'VHS', Icon: EFFECT_ICON.vhs, onClick: () => onCreateEffect('vhs') },
+              { label: 'Halftone', Icon: EFFECT_ICON.halftone, onClick: () => onCreateEffect('halftone') },
+              { label: 'Comic ink', Icon: EFFECT_ICON.comic, onClick: () => onCreateEffect('comic') },
             ]} />
             </div>
             {/* Presets: always-visible lower half, own scroll for overflow. */}
             <div className="flex-1 min-h-0 overflow-y-auto border-t border-border">
             <SimpleSection title="Presets" items={EFFECT_PRESETS.map((p) => ({
               label: p.name,
-              Icon: PRESET_ICON[p.id] ?? IconWand,
+              Icon: PRESET_ICON[p.id] ?? IconPrism,
               title: p.description,
               onClick: () => onApplyPreset(p.id),
             }))} />
@@ -169,7 +168,7 @@ export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateObjec
             </div>
           )}
         </div>
-      )}
+      </div>
     </div>
   )
 }

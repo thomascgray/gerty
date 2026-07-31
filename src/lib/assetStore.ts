@@ -167,6 +167,11 @@ function detectAssetType(mimeType: string): AssetType {
   return 'image' // fallback
 }
 
+/** The importable media types — image / audio / video. Shared by the drop and modal paths (spec 31 B7). */
+export function isSupportedMediaFile(file: File): boolean {
+  return file.type.startsWith('image/') || file.type.startsWith('audio/') || file.type.startsWith('video/')
+}
+
 /** Get media duration for audio/video files. */
 export function getMediaDuration(blob: Blob): Promise<number> {
   return new Promise((resolve, reject) => {

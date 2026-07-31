@@ -5,7 +5,7 @@ import { zoomHoldTime, zoomTargetPoseAt, editZoomPose } from '../lib/camera'
 import { clamp01 } from '../lib/easing'
 import { rememberObjectStyle, rememberObjectData } from '../lib/objectDefaults'
 import {
-  IconCopy, IconTrash, IconVector, IconSparkles, IconBold, IconItalic, IconTypography, IconHighlight,
+  IconCopy, IconTrash, IconVector, IconEaseInOut, IconBold, IconItalic, IconTypography, IconHighlight,
   IconAlignLeft, IconAlignCenter, IconAlignRight, IconAlignJustified,
   IconArrowNarrowRight, IconAdjustments, IconDroplet, IconVolume, IconVolumeOff,
   IconFocusCentered, IconClock, IconArrowsMaximize,
@@ -74,7 +74,7 @@ export function ContextToolbar({
 
       {/* Animate (all visual) — entrance/exit; keyframes stay in the inspector */}
       <Divider />
-      <Popover icon={<IconSparkles size={16} stroke={2} />} label="Animate" title="Entrance & exit animations">
+      <Popover icon={<IconEaseInOut size={16} stroke={2} />} label="Animate" title="Entrance & exit animations">
         <div className="w-60 p-3">
           <TransitionSection title="On Appear" phase="in" value={obj.enter} objDuration={obj.duration} onChange={(t) => update({ enter: t })} />
           <TransitionSection title="On Exit" phase="out" value={obj.exit} objDuration={obj.duration} onChange={(t) => update({ exit: t })} />

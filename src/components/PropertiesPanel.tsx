@@ -2,13 +2,15 @@ import { useState } from 'react'
 import {
   IconClock, IconArrowsMove, IconVector, IconLogin, IconLogout, IconDiamond,
   IconVolume, IconPalette, IconTypography, IconArrowUpRight, IconFocusCentered, IconChevronDown,
-  IconSparkles,
+  IconFilters, IconMusic,
 } from '@tabler/icons-react'
+import { EFFECT_ICON } from './effectIcons'
 import type {
   TimelineObject, ProjectAction, ArrowData, AudioData, VideoData, TextData, TextAlign, PhotoData,
   AnimatableProperty, AnimatableChannel, ChannelValue, TextEffect, EasingKind, CameraZoom,
-  VideoEffect, VideoEffectKind, VignetteShape, GradientMapPreset, ChannelSwapMapping,
+  VideoEffect, VideoEffectKind, VignetteShape, GradientMapPreset, ChannelSwapMapping, AssetMeta,
 } from '../types'
+import { getDownloadOptions } from '../lib/objectDownload'
 import {
   KF_EPS, effVal as kfEffVal, editPose, editChannel, toggleChannel, addKeyframeAt, keyframeColor,
   channelValueAt, animatedChannels, declares, declaredChannels, channelsFor, CHANNELS_BY_KEY,
@@ -38,9 +40,13 @@ type PropertiesPanelProps = {
   onToggleDraw?: () => void
   // Duplicate routes through App so the copy lands at the playhead on a new lane + gets selected.
   onDuplicate?: (objectId: string) => void
+  // Download the media object to disk — 'original' source blob, or a 'processed' re-encode
+  // (trimmed clip / extracted audio). Routes through App, which owns the project + toasts.
+  onDownload?: (objectId: string, mode: 'original' | 'processed') => void
+  assets?: AssetMeta[]
 }
 
-export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, globalTime, onSeek, isDrawing, onToggleDraw, onDuplicate }: PropertiesPanelProps) {
+export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, globalTime, onSeek, isDrawing, onToggleDraw, onDuplicate, onDownload, assets }: PropertiesPanelProps) {
   // A selected zoom or effect takes over the panel (all three selections are mutually exclusive).
   if (zoom) {
     return <ZoomEditor zoom={zoom} dispatch={dispatch} globalTime={globalTime} onSeek={onSeek} />
@@ -193,6 +199,15 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
         />
         <span className="text-[10px] text-subtle mt-1 block capitalize">{obj.type}</span>
       </div>
+
+      {/* Convert a video clip to audio-only (drops the picture, keeps the sound). Sits above the
+          sections as a top-level object action. Keyed by id so the confirm state resets per clip. */}
+      {obj.type === 'video' && (
+        <ConvertToAudioControl
+          key={obj.id}
+          onConvert={() => dispatch({ type: 'CONVERT_TO_AUDIO', objectId: obj.id })}
+        />
+      )}
 
       {/* Timing */}
       <Accordion title="Timing">
@@ -694,6 +709,31 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
         </Accordion>
       )}
 
+      {/* Download (media objects only) — original source, plus a re-encode reflecting the edit
+          (trimmed clip / extracted audio) when that differs from the original. */}
+      {onDownload && (() => {
+        const dl = getDownloadOptions(obj, assets ?? [])
+        if (!dl.canOriginal) return null
+        return (
+          <div className="mt-4 space-y-2">
+            <button
+              onClick={() => onDownload(obj.id, 'original')}
+              className="w-full px-3 py-1.5 text-xs bg-surface-muted hover:bg-surface-hover rounded transition-colors cursor-pointer"
+            >
+              {dl.processed ? 'Download original' : 'Download'}
+            </button>
+            {dl.processed && (
+              <button
+                onClick={() => onDownload(obj.id, 'processed')}
+                className="w-full px-3 py-1.5 text-xs bg-surface-muted hover:bg-surface-hover rounded transition-colors cursor-pointer"
+              >
+                {dl.processed.label}
+              </button>
+            )}
+          </div>
+        )
+      })()}
+
       {/* Actions */}
       <div className="mt-4 space-y-2">
         <button
@@ -710,6 +750,41 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
         </button>
       </div>
     </div>
+  )
+}
+
+// Top-level "Convert to audio" action for video clips — a two-step inline confirm (no modal) that
+// drops the picture and keeps the sound. Local confirm state; the parent keys it by object id so
+// switching selection resets it.
+function ConvertToAudioControl({ onConvert }: { onConvert: () => void }) {
+  const [confirming, setConfirming] = useState(false)
+  if (confirming) {
+    return (
+      <div className="mb-4 flex items-center gap-1.5">
+        <span className="flex-1 text-[11px] text-muted leading-tight">Drop the video, keep audio?</span>
+        <button
+          onClick={onConvert}
+          className="px-2.5 py-1 text-xs font-medium rounded bg-accent text-accent-contrast hover:bg-accent-hover cursor-pointer transition-colors"
+        >
+          Convert
+        </button>
+        <button
+          onClick={() => setConfirming(false)}
+          className="px-2 py-1 text-xs rounded bg-surface-muted hover:bg-surface-hover cursor-pointer transition-colors"
+        >
+          Cancel
+        </button>
+      </div>
+    )
+  }
+  return (
+    <button
+      onClick={() => setConfirming(true)}
+      title="Drop the picture and keep this clip as audio only"
+      className="mb-4 w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs bg-surface-muted hover:bg-surface-hover rounded transition-colors cursor-pointer"
+    >
+      <IconMusic size={14} stroke={2} /> Convert to audio
+    </button>
   )
 }
 
@@ -1006,7 +1081,7 @@ function EffectEditor({
         className="mb-4 flex items-center gap-2 px-2 py-1.5 rounded text-white text-xs font-semibold"
         style={{ background: EFFECT_COLOR }}
       >
-        <IconSparkles size={15} stroke={2} />
+        <IconFilters size={15} stroke={2} />
         <span>{EFFECT_LABEL[effect.kind]}</span>
       </div>
       <p className="text-[10px] text-subtle mb-4 -mt-2">
@@ -1036,7 +1111,7 @@ function EffectEditor({
 
       {/* Vignette-only shape controls */}
       {effect.kind === 'vignette' && vig && (
-        <Accordion title="Vignette" defaultOpen>
+        <Accordion title="Vignette" icon={effectIcon(effect.kind)} defaultOpen>
           <Field label="Shape">
             <select
               value={vig.shape}
@@ -1080,7 +1155,7 @@ function EffectEditor({
 
       {/* Old-film-only wobble (gate weave) — decoupled from intensity, defaults to 0 */}
       {effect.kind === 'oldfilm' && old && (
-        <Accordion title="Old Film" defaultOpen>
+        <Accordion title="Old Film" icon={effectIcon(effect.kind)} defaultOpen>
           <Field label="Wobble">
             <div className="flex items-center gap-2 w-full">
               <input
@@ -1101,7 +1176,7 @@ function EffectEditor({
 
       {/* Hue shift (spec 24): static angle, or an animated psychedelic cycle */}
       {effect.kind === 'hue' && hue && (
-        <Accordion title="Hue" defaultOpen>
+        <Accordion title="Hue" icon={effectIcon(effect.kind)} defaultOpen>
           <Field label="Animate">
             <input
               type="checkbox"
@@ -1145,7 +1220,7 @@ function EffectEditor({
 
       {/* Light leak (spec 24): colour, streak angle, drift speed */}
       {effect.kind === 'lightleak' && leak && (
-        <Accordion title="Light Leak" defaultOpen>
+        <Accordion title="Light Leak" icon={effectIcon(effect.kind)} defaultOpen>
           <Field label="Colour">
             <input
               type="color"
@@ -1184,7 +1259,7 @@ function EffectEditor({
 
       {/* Chromatic split (spec 24): separation distance + direction */}
       {effect.kind === 'chromatic' && chroma && (
-        <Accordion title="Chromatic" defaultOpen>
+        <Accordion title="Chromatic" icon={effectIcon(effect.kind)} defaultOpen>
           <Field label="Offset">
             <div className="flex items-center gap-2 w-full">
               <input
@@ -1215,7 +1290,7 @@ function EffectEditor({
 
       {/* Gradient map (spec 25, WebGL): choose the false-colour ramp */}
       {effect.kind === 'gradientmap' && gmap && (
-        <Accordion title="Gradient Map" defaultOpen>
+        <Accordion title="Gradient Map" icon={effectIcon(effect.kind)} defaultOpen>
           <Field label="Ramp">
             <select
               value={gmap.preset}
@@ -1236,7 +1311,7 @@ function EffectEditor({
 
       {/* Posterize (spec 25, WebGL): quantize to N bands per channel */}
       {effect.kind === 'posterize' && post && (
-        <Accordion title="Posterize" defaultOpen>
+        <Accordion title="Posterize" icon={effectIcon(effect.kind)} defaultOpen>
           <Field label="Levels">
             <div className="flex items-center gap-2 w-full">
               <input
@@ -1255,7 +1330,7 @@ function EffectEditor({
 
       {/* Duotone / threshold (spec 25, WebGL): two colours split by luminance */}
       {effect.kind === 'threshold' && duo && (
-        <Accordion title="Duotone" defaultOpen>
+        <Accordion title="Duotone" icon={effectIcon(effect.kind)} defaultOpen>
           <Field label="Dark">
             <input
               type="color"
@@ -1292,7 +1367,7 @@ function EffectEditor({
 
       {/* Channel swap (spec 25, WebGL): permute RGB */}
       {effect.kind === 'channelswap' && swap && (
-        <Accordion title="Channel Swap" defaultOpen>
+        <Accordion title="Channel Swap" icon={effectIcon(effect.kind)} defaultOpen>
           <Field label="Mapping">
             <select
               value={swap.mapping}
@@ -1312,7 +1387,7 @@ function EffectEditor({
 
       {/* Colour isolation (spec 25, WebGL): keep one hue, desaturate the rest */}
       {effect.kind === 'colorisolate' && iso && (
-        <Accordion title="Colour Isolate" defaultOpen>
+        <Accordion title="Colour Isolate" icon={effectIcon(effect.kind)} defaultOpen>
           <Field label="Colour">
             <input
               type="color"
@@ -1340,7 +1415,7 @@ function EffectEditor({
 
       {/* Dither (spec 25, WebGL): ordered Bayer dithering + quantization */}
       {effect.kind === 'dither' && dith && (
-        <Accordion title="Dither" defaultOpen>
+        <Accordion title="Dither" icon={effectIcon(effect.kind)} defaultOpen>
           <Field label="Levels">
             <div className="flex items-center gap-2 w-full">
               <input
@@ -1371,7 +1446,7 @@ function EffectEditor({
 
       {/* CRT (spec 25, WebGL): barrel curvature + scanlines + phosphor mask */}
       {effect.kind === 'crt' && crt && (
-        <Accordion title="CRT" defaultOpen>
+        <Accordion title="CRT" icon={effectIcon(effect.kind)} defaultOpen>
           <Field label="Curvature">
             <div className="flex items-center gap-2 w-full">
               <input
@@ -1402,7 +1477,7 @@ function EffectEditor({
 
       {/* VHS (spec 25, WebGL, animated): chroma bleed + tracking noise */}
       {effect.kind === 'vhs' && vhs && (
-        <Accordion title="VHS" defaultOpen>
+        <Accordion title="VHS" icon={effectIcon(effect.kind)} defaultOpen>
           <Field label="Chroma bleed">
             <div className="flex items-center gap-2 w-full">
               <input
@@ -1433,7 +1508,7 @@ function EffectEditor({
 
       {/* Halftone (spec 25, WebGL): comic dot screen */}
       {effect.kind === 'halftone' && half && (
-        <Accordion title="Halftone" defaultOpen>
+        <Accordion title="Halftone" icon={effectIcon(effect.kind)} defaultOpen>
           <Field label="Dot size">
             <div className="flex items-center gap-2 w-full">
               <input
@@ -1464,7 +1539,7 @@ function EffectEditor({
 
       {/* Comic ink (spec 25, WebGL): Sobel edges over a posterized base */}
       {effect.kind === 'comic' && comic && (
-        <Accordion title="Comic Ink" defaultOpen>
+        <Accordion title="Comic Ink" icon={effectIcon(effect.kind)} defaultOpen>
           <Field label="Colours">
             <div className="flex items-center gap-2 w-full">
               <input
@@ -1554,22 +1629,16 @@ const SECTION_ICONS: Record<string, React.ReactNode> = {
   Text: <IconTypography size={15} stroke={2} />,
   Arrow: <IconArrowUpRight size={15} stroke={2} />,
   Focus: <IconFocusCentered size={15} stroke={2} />,
-  Effects: <IconSparkles size={15} stroke={2} />,
-  Vignette: <IconSparkles size={15} stroke={2} />,
-  'Old Film': <IconSparkles size={15} stroke={2} />,
-  Hue: <IconSparkles size={15} stroke={2} />,
-  'Light Leak': <IconSparkles size={15} stroke={2} />,
-  Chromatic: <IconSparkles size={15} stroke={2} />,
-  'Gradient Map': <IconSparkles size={15} stroke={2} />,
-  Posterize: <IconSparkles size={15} stroke={2} />,
-  Duotone: <IconSparkles size={15} stroke={2} />,
-  'Channel Swap': <IconSparkles size={15} stroke={2} />,
-  'Colour Isolate': <IconSparkles size={15} stroke={2} />,
-  Dither: <IconSparkles size={15} stroke={2} />,
-  CRT: <IconSparkles size={15} stroke={2} />,
-  VHS: <IconSparkles size={15} stroke={2} />,
-  Halftone: <IconSparkles size={15} stroke={2} />,
-  'Comic Ink': <IconSparkles size={15} stroke={2} />,
+  // Generic effects card (object inspector). The 15 per-EFFECT parameter cards do NOT live here —
+  // they pass their per-kind icon explicitly via Accordion's `icon` prop, sourced from EFFECT_ICON
+  // (spec 31 D5/D6), so one map keeps LeftRail + the inspector in sync.
+  Effects: <IconFilters size={15} stroke={2} />,
+}
+
+// Icon element for a per-effect parameter card, from the shared EFFECT_ICON map (spec 31 D5/D6).
+function effectIcon(kind: VideoEffectKind): React.ReactNode {
+  const Icon = EFFECT_ICON[kind]
+  return <Icon size={15} stroke={2} />
 }
 
 /**
@@ -1578,12 +1647,13 @@ const SECTION_ICONS: Record<string, React.ReactNode> = {
  * `marked`: something in this card animates, but not on the active keyframe (a neutral ◇), so a
  * collapsed card still advertises that it holds animation.
  */
-function Accordion({ title, children, defaultOpen = false, accent = null, marked = false }: {
+function Accordion({ title, children, defaultOpen = false, accent = null, marked = false, icon }: {
   title: string
   children: React.ReactNode
   defaultOpen?: boolean
   accent?: string | null
   marked?: boolean
+  icon?: React.ReactNode   // explicit icon (per-effect cards, spec 31 D7); falls back to SECTION_ICONS[title]
 }) {
   const [open, setOpen] = useState(defaultOpen)
   return (
@@ -1596,7 +1666,7 @@ function Accordion({ title, children, defaultOpen = false, accent = null, marked
         onClick={() => setOpen((o) => !o)}
         className="flex w-full items-center gap-2 px-2.5 py-2 text-left transition-colors hover:bg-surface-hover cursor-pointer"
       >
-        <span className="text-subtle">{SECTION_ICONS[title]}</span>
+        <span className="text-subtle">{icon ?? SECTION_ICONS[title]}</span>
         <span className="flex-1 text-[11px] font-semibold uppercase tracking-wider text-fg">{title}</span>
         {(accent || marked) && (
           <span className="text-[10px] leading-none" style={accent ? { color: accent } : undefined}>
