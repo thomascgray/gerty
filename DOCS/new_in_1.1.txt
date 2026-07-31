@@ -1,0 +1,12 @@
+- everything in /specs/31-qol-fixes-29-07-2026.md
+    - timeline expand button no longer jumps around when collapsed
+    - shift+scroll to pan the timeline sideways (all scroll shortcuts now listed in the hotkeys modal)
+    - drop files anywhere in the window to import them (not just via the modal)
+    - new toast notifications (e.g. when you drop unsupported files)
+    - fresh effect icons - retired the old sparkles/wand
+    - timeline bars/lanes shrink when zoomed way out so more fits on screen
+    - smooth open/close animations for the timeline and the asset panel
+- adding a marker at a specific time
+- animations for UI elements
+- convert video to audio
+- download raw objects back to your computer modified with their trim/etc

@@ -322,6 +322,28 @@ function applyAction(project: Project, action: ProjectAction): Project {
       return { ...project, objects }
     }
 
+    case 'CONVERT_TO_AUDIO': {
+      const idx = project.objects.findIndex((o) => o.id === action.objectId)
+      if (idx === -1) return project
+      const obj = project.objects[idx]
+      if (obj.type !== 'video') return project
+      // VideoData and AudioData are field-identical (assetId/volume/muted/originalDuration/waveform/
+      // source*), so the payload carries over untouched. We only flip the type and shed the
+      // visual-only animation state (keyframes/enter/exit/type-on reveal) — dead data on an
+      // audio clip — so the result reads as a clean audio object.
+      const converted: TimelineObject = {
+        ...obj,
+        type: 'audio',
+        animateIn: 0,
+        keyframes: undefined,
+        enter: undefined,
+        exit: undefined,
+      }
+      const objects = [...project.objects]
+      objects[idx] = converted
+      return { ...project, objects }
+    }
+
     case 'REMOVE_LANE': {
       const laneToRemove = action.lane
       const lanes = [...new Set(project.objects.map((o) => o.lane))].sort((a, b) => a - b)

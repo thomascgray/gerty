@@ -7,10 +7,13 @@ import { useProject } from '../hooks/useProject'
 import { usePlayback } from '../hooks/usePlayback'
 import { useAudioPlayback } from '../hooks/useAudioPlayback'
 import { useUiPrefs } from '../hooks/useUiPrefs'
-import { loadAssetsFromDB, clearAllAssets, getAssetBlob, generateWaveform } from '../lib/assetStore'
+import { loadAssetsFromDB, clearAllAssets, getAssetBlob, generateWaveform, isSupportedMediaFile } from '../lib/assetStore'
 import { exportProjectBrep, importProjectBrep } from '../lib/projectStorage'
+import { downloadOriginal, downloadProcessed } from '../lib/objectDownload'
+import { pushToast, dismissToast } from '../hooks/useToasts'
 import { config } from '../config'
 import Canvas from './Canvas'
+import Toasts from './Toasts'
 import LeftRail from './LeftRail'
 import AspectRatioSelector from './AspectRatioSelector'
 import TransportBar from './TransportBar'
@@ -20,9 +23,10 @@ import ImportModal from './ImportModal'
 import ExportModal from './ExportModal'
 import AppearanceControls from './AppearanceControls'
 import HotkeysModal from './HotkeysModal'
+import ChangelogModal from './ChangelogModal'
 import {
   IconDeviceFloppy, IconFolderOpen, IconArrowBackUp, IconArrowForwardUp,
-  IconDownload, IconChevronUp, IconKeyboard,
+  IconDownload, IconChevronUp, IconKeyboard, IconCoffee, IconHistory,
 } from '@tabler/icons-react'
 
 // Timeline resize/collapse (spec 16 B). Ephemeral view state — not persisted, not part of undo.
@@ -30,6 +34,7 @@ const HEADER_HEIGHT = 48 // top bar (h-12)
 const MIN_TIMELINE_HEIGHT = 140 // ruler + Camera track + ~1 lane + add-lane rows stay usable
 const MIN_RENDER_HEIGHT = 200 // never let the timeline starve the render below this
 const COLLAPSED_TIMELINE_HEIGHT = 32
+const SPLITTER_HEIGHT = 6 // the resize handle (h-1.5); part of the animated timeline-area height
 
 const maxTimelineHeight = () =>
   Math.max(MIN_TIMELINE_HEIGHT, window.innerHeight - HEADER_HEIGHT - MIN_RENDER_HEIGHT)
@@ -78,16 +83,28 @@ export default function App() {
   const [showImport, setShowImport] = useState(false)
   const [showExport, setShowExport] = useState(false)
   const [showHotkeys, setShowHotkeys] = useState(false)
+  const [showChangelog, setShowChangelog] = useState(false)
   const projectFileRef = useRef<HTMLInputElement>(null)
+
+  // Drag-and-drop import (spec 31 B). A window-level drop opens ImportModal pre-staged. `dropFiles`
+  // is handed to the modal (fresh array each drop → append when already open, B9). `isFileDragging`
+  // drives the drop overlay; the depth counter keeps it flicker-free across child dragenter/leave (B3).
+  const [isFileDragging, setIsFileDragging] = useState(false)
+  const [dropFiles, setDropFiles] = useState<File[] | undefined>(undefined)
+  const dragDepthRef = useRef(0)
 
   // Timeline resize/collapse (spec 16 B). Both are ephemeral view state (like cameraView).
   const [timelineHeight, setTimelineHeight] = useState<number>(defaultTimelineHeight)
   const [timelineCollapsed, setTimelineCollapsed] = useState(false)
+  // Suppress the collapse height-transition while the user is dragging the splitter — otherwise the
+  // 200ms ease lags a frame behind the cursor on every resize move.
+  const [isResizingTimeline, setIsResizingTimeline] = useState(false)
   const splitterDragRef = useRef<{ startY: number; startHeight: number } | null>(null)
 
   const handleSplitterDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
     splitterDragRef.current = { startY: e.clientY, startHeight: timelineHeight }
+    setIsResizingTimeline(true)
   }, [timelineHeight])
 
   // Splitter drag (B1/B2) + re-clamp on window resize (B5).
@@ -98,7 +115,7 @@ export default function App() {
       // Drag up (smaller clientY) grows the timeline; down shrinks it.
       setTimelineHeight(clampTimelineHeight(d.startHeight - (e.clientY - d.startY)))
     }
-    const onUp = () => { splitterDragRef.current = null }
+    const onUp = () => { if (splitterDragRef.current) { splitterDragRef.current = null; setIsResizingTimeline(false) } }
     const onResize = () => setTimelineHeight((h) => clampTimelineHeight(h))
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
@@ -401,6 +418,11 @@ export default function App() {
     dispatch({ type: 'ADD_MARKER', marker: createMarker({ time: playback.globalTime }) })
   }, [dispatch, playback.globalTime])
 
+  // Add a marker at an explicit, typed-in time (TransportBar's clock popover). Clamp to >= 0.
+  const handleAddMarkerAt = useCallback((time: number) => {
+    dispatch({ type: 'ADD_MARKER', marker: createMarker({ time: Math.max(0, time) }) })
+  }, [dispatch])
+
   const handleStepMarker = useCallback((dir: 1 | -1) => {
     const times = (project.markers ?? []).map((m) => m.time).sort((a, b) => a - b)
     if (times.length === 0) return
@@ -545,6 +567,78 @@ export default function App() {
     handleSelectObject(newId)
   }, [project.objects, playback.globalTime, dispatch, handleSelectObject])
 
+  // Download a media object back to disk — either its untouched source ('original') or a
+  // re-encode reflecting its edits ('processed': trimmed clip / extracted audio). The processed
+  // path runs the export encoders on the main thread, so it can take a moment on long clips.
+  const handleDownloadObject = useCallback(async (objectId: string, mode: 'original' | 'processed') => {
+    const obj = project.objects.find((o) => o.id === objectId)
+    if (!obj) return
+    if (mode === 'original') {
+      try { downloadOriginal(obj, project.assets) }
+      catch (err) { pushToast(`Download failed: ${err instanceof Error ? err.message : String(err)}`, 'error') }
+      return
+    }
+    const toastId = pushToast('Preparing download…', 'info')
+    try {
+      await downloadProcessed(obj, project)
+      dismissToast(toastId)
+      pushToast('Download ready', 'success')
+    } catch (err) {
+      dismissToast(toastId)
+      pushToast(`Download failed: ${err instanceof Error ? err.message : String(err)}`, 'error')
+    }
+  }, [project])
+
+  // Window-level file drag-and-drop → import (spec 31 B1-B4, B14). A drop anywhere opens ImportModal
+  // pre-staged. A drag-depth counter keeps the overlay flicker-free (dragenter/leave fire per child).
+  // `dragover` MUST preventDefault or the browser navigates to the file. Dropping ON the open modal is
+  // handled by the modal (it stopPropagation's), so this only fires for drops elsewhere (append, B9).
+  useEffect(() => {
+    const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes('Files')
+    const onDragEnter = (e: DragEvent) => {
+      if (!hasFiles(e)) return
+      e.preventDefault()
+      dragDepthRef.current += 1
+      setIsFileDragging(true)
+    }
+    const onDragOver = (e: DragEvent) => {
+      if (!hasFiles(e)) return
+      e.preventDefault()
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+    }
+    const onDragLeave = (e: DragEvent) => {
+      if (!hasFiles(e)) return
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+      if (dragDepthRef.current === 0) setIsFileDragging(false)
+    }
+    const onDrop = (e: DragEvent) => {
+      if (!hasFiles(e)) return
+      e.preventDefault()
+      dragDepthRef.current = 0
+      setIsFileDragging(false)
+      const files = Array.from(e.dataTransfer?.files ?? [])
+      if (files.length === 0) return
+      const supported = files.filter(isSupportedMediaFile)
+      const unsupported = files.filter((f) => !isSupportedMediaFile(f))
+      if (unsupported.length > 0) {
+        pushToast(`Can't import: ${unsupported.map((f) => f.name).join(', ')}`, 'error')
+      }
+      if (supported.length === 0) return // all unsupported → toast only, no empty modal (B14)
+      setDropFiles(supported)            // fresh array each drop → modal stages / appends (B9)
+      setShowImport(true)
+    }
+    window.addEventListener('dragenter', onDragEnter)
+    window.addEventListener('dragover', onDragOver)
+    window.addEventListener('dragleave', onDragLeave)
+    window.addEventListener('drop', onDrop)
+    return () => {
+      window.removeEventListener('dragenter', onDragEnter)
+      window.removeEventListener('dragover', onDragOver)
+      window.removeEventListener('dragleave', onDragLeave)
+      window.removeEventListener('drop', onDrop)
+    }
+  }, [])
+
   return (
     <div className="h-screen flex flex-col bg-bg text-fg">
       {/* Top Bar */}
@@ -615,6 +709,24 @@ export default function App() {
           >
             <IconKeyboard size={16} stroke={2} />
           </button>
+          <button
+            onClick={() => setShowChangelog(true)}
+            title="What's new"
+            aria-label="What's new"
+            className="flex items-center justify-center w-7 h-7 rounded text-muted hover:text-fg hover:bg-surface-hover cursor-pointer transition-colors"
+          >
+            <IconHistory size={16} stroke={2} />
+          </button>
+          <a
+            href="https://buymeacoffee.com/tmcgry"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Buy me a coffee"
+            aria-label="Buy me a coffee"
+            className="flex items-center justify-center w-7 h-7 rounded text-muted hover:text-fg hover:bg-surface-hover cursor-pointer transition-colors"
+          >
+            <IconCoffee size={16} stroke={2} />
+          </a>
           <span className="w-px h-6 bg-border" />
           <button
             onClick={() => setShowExport(true)}
@@ -673,6 +785,7 @@ export default function App() {
               onVolume={setVolume}
               onToggleMute={toggleMute}
               onAddMarker={handleAddMarker}
+              onAddMarkerAt={handleAddMarkerAt}
               onClearMarkers={handleClearMarkers}
               markerCount={project.markers?.length ?? 0}
             />
@@ -689,62 +802,89 @@ export default function App() {
           isDrawing={interactionMode === 'draw'}
           onToggleDraw={handleToggleDrawSelected}
           onDuplicate={handleDuplicateObject}
+          onDownload={handleDownloadObject}
+          assets={project.assets}
         />
       </div>
 
-      {/* Timeline (spec 16 B): bounded height, resizable via a splitter, collapsible to a slim bar. */}
-      {timelineCollapsed ? (
-        <div className="shrink-0 flex items-center justify-between px-3 bg-surface border-t border-border" style={{ height: COLLAPSED_TIMELINE_HEIGHT }}>
-          <span className="text-xs text-muted">Timeline</span>
-          <button
-            onClick={() => setTimelineCollapsed(false)}
-            className="px-2 py-0.5 text-xs text-muted hover:text-fg flex items-center gap-1 cursor-pointer"
-            title="Expand timeline"
-          >
-            <IconChevronUp size={14} stroke={2} /> Expand
-          </button>
-        </div>
-      ) : (
-        <>
-          {/* Drag handle — resize the render / timeline split */}
-          <div
-            onMouseDown={handleSplitterDown}
-            className="shrink-0 h-1.5 cursor-row-resize bg-border hover:bg-accent/60 transition-colors"
-            title="Drag to resize timeline"
-          />
-          <div className="shrink-0" style={{ height: timelineHeight }}>
-            <Timeline
-              objects={project.objects}
-              globalTime={playback.globalTime}
-              totalDuration={playback.totalDuration}
-              selectedObjectIds={selectedObjectIds}
-              onSelectObject={handleSelectObject}
-              onSeek={playback.seek}
-              dispatch={dispatch}
-              zooms={project.zooms}
-              selectedZoomId={selectedZoomId}
-              onSelectZoom={handleSelectZoom}
-              effects={project.effects}
-              selectedEffectId={selectedEffectId}
-              onSelectEffect={handleSelectEffect}
-              markers={project.markers}
-              onCollapse={() => setTimelineCollapsed(true)}
-            />
+      {/* Timeline (spec 16 B): bounded height, resizable via a splitter, collapsible to a slim bar.
+          The whole area sits in a height-animated wrapper (overflow clipped) so collapse/expand slides
+          instead of snapping. The transition is suppressed mid-resize so splitter drags stay 1:1. */}
+      <div
+        className={`shrink-0 overflow-hidden bg-surface flex flex-col ${isResizingTimeline ? '' : 'transition-[height] duration-200 ease-out'}`}
+        style={{ height: timelineCollapsed ? COLLAPSED_TIMELINE_HEIGHT : SPLITTER_HEIGHT + timelineHeight }}
+      >
+        {timelineCollapsed ? (
+          // Expand toggle lives in the SAME left cell as the collapse chevron (Timeline's gutter,
+          // width 32 = GUTTER_WIDTH) so collapse→expand needs zero mouse travel (spec 31 A1).
+          <div className="flex items-center bg-surface border-t border-border" style={{ height: COLLAPSED_TIMELINE_HEIGHT }}>
+            <button
+              onClick={() => setTimelineCollapsed(false)}
+              className="h-full flex items-center justify-center bg-surface-muted border-r border-border text-subtle hover:text-fg transition-colors cursor-pointer"
+              style={{ width: 32 }}
+              title="Expand timeline"
+            >
+              <IconChevronUp size={14} stroke={2} />
+            </button>
+            <span className="text-xs text-muted px-3">Timeline</span>
           </div>
-        </>
-      )}
+        ) : (
+          <>
+            {/* Drag handle — resize the render / timeline split */}
+            <div
+              onMouseDown={handleSplitterDown}
+              className="shrink-0 h-1.5 cursor-row-resize bg-border hover:bg-accent/60 transition-colors"
+              title="Drag to resize timeline"
+            />
+            <div className="shrink-0" style={{ height: timelineHeight }}>
+              <Timeline
+                objects={project.objects}
+                globalTime={playback.globalTime}
+                totalDuration={playback.totalDuration}
+                selectedObjectIds={selectedObjectIds}
+                onSelectObject={handleSelectObject}
+                onSeek={playback.seek}
+                dispatch={dispatch}
+                zooms={project.zooms}
+                selectedZoomId={selectedZoomId}
+                onSelectZoom={handleSelectZoom}
+                effects={project.effects}
+                selectedEffectId={selectedEffectId}
+                onSelectEffect={handleSelectEffect}
+                markers={project.markers}
+                onCollapse={() => setTimelineCollapsed(true)}
+              />
+            </div>
+          </>
+        )}
+      </div>
 
       {/* Modals */}
       {showImport && (
         <ImportModal
           onImport={addObjects}
-          onClose={() => setShowImport(false)}
+          onClose={() => { setShowImport(false); setDropFiles(undefined) }}
           insertAtTime={playback.globalTime}
           onAssetsAdded={(assets) => dispatch({ type: 'ADD_ASSETS', assets })}
+          initialFiles={dropFiles}
         />
       )}
       {showExport && <ExportModal project={project} onClose={() => setShowExport(false)} />}
       {showHotkeys && <HotkeysModal onClose={() => setShowHotkeys(false)} />}
+      {showChangelog && <ChangelogModal onClose={() => setShowChangelog(false)} />}
+
+      {/* Drop-to-import affordance (spec 31 B2). Hidden once the modal is open — the modal has its own
+          drop zone. pointer-events-none so it never intercepts the drag/drop events themselves. */}
+      {isFileDragging && !showImport && (
+        <div className="fixed inset-0 z-150 pointer-events-none flex items-center justify-center bg-accent/10">
+          <div className="rounded-xl border-2 border-dashed border-accent bg-surface/95 px-8 py-6 text-center shadow-xl">
+            <div className="text-lg font-semibold text-fg">Drop to import</div>
+            <div className="text-sm text-muted mt-1">Images, video, and audio</div>
+          </div>
+        </div>
+      )}
+
+      <Toasts />
     </div>
   )
 }

@@ -9,6 +9,7 @@ import {
   getTotalAssetSize,
   fetchAssetFromUrl,
   isFetchableUrl,
+  isSupportedMediaFile,
   AssetFetchError,
   SIZE_WARN_PER_FILE,
   SIZE_WARN_TOTAL,
@@ -20,6 +21,9 @@ type ImportModalProps = {
   onClose: () => void;
   insertAtTime?: number;
   onAssetsAdded?: (assets: AssetMeta[]) => void;
+  // Files handed in from a window-level drop (spec 31 B1/B9). Staged once per distinct array, so a
+  // fresh drop onto an already-open modal appends rather than resetting.
+  initialFiles?: File[];
 };
 
 /**
@@ -93,6 +97,7 @@ export default function ImportModal({
   onClose,
   insertAtTime = 0,
   onAssetsAdded,
+  initialFiles,
 }: ImportModalProps) {
   const [pending, setPending] = useState<PendingAsset[]>([]);
   const [isDragging, setIsDragging] = useState(false);
@@ -105,20 +110,33 @@ export default function ImportModal({
   }, [pending]);
 
   const addFiles = useCallback(async (files: File[]) => {
-    const supported = files.filter(
-      (f) =>
-        f.type.startsWith("image/") ||
-        f.type.startsWith("audio/") ||
-        f.type.startsWith("video/")
-    );
+    const supported = files.filter(isSupportedMediaFile);
     if (supported.length === 0) return;
 
-    const newPending: PendingAsset[] = [];
-    for (const file of supported) {
-      newPending.push(await buildPendingAsset(file));
+    // Insert a loading row per file UP FRONT, then resolve each in place (spec 31 B8) — mirroring
+    // addUrl. buildPendingAsset awaits duration/animation probes, so without this the modal would
+    // sit blank until every file finished. handleImport ignores non-`ready` rows, so this is safe.
+    const entries = supported.map((file) => ({ id: crypto.randomUUID(), file }));
+    setPending((prev) => [
+      ...prev,
+      ...entries.map(({ id, file }) => ({
+        id,
+        status: "loading" as const,
+        name: file.name,
+      })),
+    ]);
+    for (const { id, file } of entries) {
+      try {
+        const staged = await buildPendingAsset(file);
+        setPending((prev) => prev.map((p) => (p.id === id ? { ...staged, id } : p)));
+      } catch {
+        setPending((prev) =>
+          prev.map((p) =>
+            p.id === id ? { ...p, status: "error", error: "Couldn't read that file." } : p
+          )
+        );
+      }
     }
-
-    setPending((prev) => [...prev, ...newPending]);
   }, []);
 
   /**
@@ -187,14 +205,24 @@ export default function ImportModal({
     return () => window.removeEventListener("paste", handlePaste);
   }, [addFiles, addUrl]);
 
-  const handleDrop = useCallback(
-    (e: React.DragEvent) => {
-      e.preventDefault();
-      setIsDragging(false);
-      addFiles(Array.from(e.dataTransfer.files));
-    },
-    [addFiles]
-  );
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    // Routing (partition, reject-toast, staging) is owned by App's single window-level drop handler
+    // (spec 31 B9) — which also staffs the already-open case via `initialFiles`, and keeps the
+    // drag-overlay depth counter balanced. Here we only clear this drop zone's own highlight; the
+    // event bubbles on to the window handler (we deliberately do NOT stopPropagation).
+    e.preventDefault();
+    setIsDragging(false);
+  }, []);
+
+  // Stage files handed in from a window-level drop (spec 31 B1/B9). Keyed on the array identity so a
+  // new drop (App passes a fresh array) appends; re-renders with the same array don't re-stage.
+  const stagedInitialRef = useRef<File[] | null>(null);
+  useEffect(() => {
+    if (initialFiles && initialFiles.length > 0 && initialFiles !== stagedInitialRef.current) {
+      stagedInitialRef.current = initialFiles;
+      void addFiles(initialFiles);
+    }
+  }, [initialFiles, addFiles]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();

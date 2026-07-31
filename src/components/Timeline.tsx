@@ -6,7 +6,7 @@ import { zoomEnvelope } from '../lib/camera'
 import { effectEnvelope } from '../lib/effects'
 import { sourceSpan, srcIn, srcOut, srcMin, srcMax } from '../lib/mediaTiming'
 import { snapTime, snapClipMove, SNAP_THRESHOLD_PX } from '../lib/snapping'
-import { IconChevronDown, IconPlus, IconX, IconViewfinder, IconSparkles, IconEye, IconEyeOff, IconTrash } from '@tabler/icons-react'
+import { IconChevronDown, IconPlus, IconX, IconViewfinder, IconFilters, IconEye, IconEyeOff, IconTrash } from '@tabler/icons-react'
 
 type TimelineProps = {
   objects: TimelineObject[]
@@ -47,6 +47,17 @@ const ZOOM_WHEEL_SENSITIVITY = 0.0012
 const TIMELINE_PADDING_SECONDS = 5
 const ZOOM_COLOR = '#f59e0b' // amber — matches the canvas framing rect + zoom panel
 const EFFECT_COLOR = '#d946ef' // fuchsia — matches the effect panel header; distinct from violet video bars
+
+// Zoomed way out, clips shrink to thin vertical slivers; shrink the lane/bar height to match so they
+// read as slim ticks rather than tall hairlines. Full height above the threshold, lerping down to
+// MIN_LANE_HEIGHT at max zoom-out. Everything in the lane column derives from this so rows stay aligned.
+const MIN_LANE_HEIGHT = 20
+const LANE_SHRINK_BELOW_PPS = 24 // start shrinking once zoomed out past this pixels-per-second
+function laneHeightFor(pps: number): number {
+  if (pps >= LANE_SHRINK_BELOW_PPS) return LANE_HEIGHT
+  const t = Math.max(0, Math.min(1, (pps - MIN_PIXELS_PER_SECOND) / (LANE_SHRINK_BELOW_PPS - MIN_PIXELS_PER_SECOND)))
+  return Math.round(MIN_LANE_HEIGHT + t * (LANE_HEIGHT - MIN_LANE_HEIGHT))
+}
 const MARKER_COLOR = '#06b6d4' // cyan — distinct from amber zooms, the type colors, and the playhead
 const SNAP_LINE_COLOR = '#ffffff' // the bright guide shown while a drag is actively snapped
 // Swatches offered in the marker edit popover (spec 22 R17).
@@ -253,31 +264,49 @@ export default function Timeline({
     [objects, markers, globalTime],
   )
 
-  // Time-zoom with Ctrl/Cmd + wheel (spec 16 A2). MUST be a native, non-passive listener: React's
-  // onWheel is passive, so its preventDefault is ignored and the browser page-zooms instead (the
-  // bug this replaces). Plain wheel falls through to the container's native horizontal + vertical
-  // lane scroll. A ref keeps the once-attached listener reading the live pixelsPerSecond.
+  // Timeline wheel gestures (spec 31 C): Ctrl/Cmd + wheel = zoom (spec 16 A2), Shift + wheel = pan
+  // through time, plain wheel = native vertical lane scroll. MUST be a native, non-passive listener:
+  // React's onWheel is passive, so its preventDefault is ignored and the browser page-zooms/scrolls
+  // instead (the bug this replaces). A ref keeps the once-attached listener reading live pixelsPerSecond.
   const pixelsPerSecondRef = useRef(pixelsPerSecond)
   pixelsPerSecondRef.current = pixelsPerSecond
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
     const onWheel = (e: WheelEvent) => {
-      if (!(e.ctrlKey || e.metaKey)) return // let plain wheel scroll the lanes natively
-      e.preventDefault()
-      const prev = pixelsPerSecondRef.current
-      // Zoom proportional to the actual scroll distance so trackpads (which fire many tiny deltas /
-      // pinch events) aren't unusably fast. Normalize deltaMode to px, then clamp the per-event step.
-      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientHeight : 1
-      const factor = Math.min(1.25, Math.max(0.8, Math.exp(-e.deltaY * unit * ZOOM_WHEEL_SENSITIVITY)))
-      const next = Math.min(MAX_PIXELS_PER_SECOND, Math.max(MIN_PIXELS_PER_SECOND, prev * factor))
-      if (next === prev) return
-      // Keep the time under the cursor fixed: remember its content-x, restore scrollLeft after the
-      // timeline width re-renders (browser clamps scrollLeft to valid range for us).
-      const cursorX = e.clientX - el.getBoundingClientRect().left
-      const t = (cursorX + el.scrollLeft - GUTTER_WIDTH) / prev
-      setPixelsPerSecond(next)
-      requestAnimationFrame(() => { el.scrollLeft = t * next - cursorX + GUTTER_WIDTH })
+      // Ctrl/Cmd + wheel → zoom the timeline (spec 16 A2). Trackpad pinch arrives here as
+      // wheel + ctrlKey, so pinch-to-zoom works for free.
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault()
+        const prev = pixelsPerSecondRef.current
+        // Zoom proportional to the actual scroll distance so trackpads (which fire many tiny deltas /
+        // pinch events) aren't unusably fast. Normalize deltaMode to px, then clamp the per-event step.
+        const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientHeight : 1
+        const factor = Math.min(1.25, Math.max(0.8, Math.exp(-e.deltaY * unit * ZOOM_WHEEL_SENSITIVITY)))
+        const next = Math.min(MAX_PIXELS_PER_SECOND, Math.max(MIN_PIXELS_PER_SECOND, prev * factor))
+        if (next === prev) return
+        // Keep the time under the cursor fixed: remember its content-x, restore scrollLeft after the
+        // timeline width re-renders (browser clamps scrollLeft to valid range for us).
+        const cursorX = e.clientX - el.getBoundingClientRect().left
+        const t = (cursorX + el.scrollLeft - GUTTER_WIDTH) / prev
+        setPixelsPerSecond(next)
+        requestAnimationFrame(() => { el.scrollLeft = t * next - cursorX + GUTTER_WIDTH })
+        return
+      }
+      // Shift + wheel → pan horizontally through time (spec 31 C2). Handled explicitly rather than
+      // relying on the browser's inconsistent native "shift makes the wheel horizontal" translation;
+      // preventDefault also stops that native translation from double-applying. The playhead does not
+      // move — this pans the view only, and the browser clamps scrollLeft at the timeline edges.
+      if (e.shiftKey) {
+        e.preventDefault()
+        const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientHeight : 1
+        // A mouse emits only deltaY; pan by whichever axis dominates so both mice and trackpads work.
+        const d = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX
+        el.scrollLeft += d * unit
+        return
+      }
+      // Plain wheel falls through to the container's native vertical lane scroll (and native
+      // horizontal scroll from a trackpad's deltaX).
     }
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)
@@ -345,7 +374,7 @@ export default function Timeline({
         if (dragState.minGroupStart + dtApplied < 0) dtApplied = -dragState.minGroupStart
         // Shared lane delta, clamped to the group's collective lane extent.
         const dy = e.clientY - dragState.startMouseY
-        const rawLaneDelta = Math.round(-dy / (LANE_HEIGHT + LANE_GAP))
+        const rawLaneDelta = Math.round(-dy / (laneHeightFor(pixelsPerSecond) + LANE_GAP))
         const laneDelta = Math.max(dragState.clampMinLaneDelta, Math.min(dragState.clampMaxLaneDelta, rawLaneDelta))
         // One transient dispatch per member — they collapse into a single undo entry on commit.
         for (const g of dragState.group) {
@@ -588,7 +617,10 @@ export default function Timeline({
     ticks.push({ time: t, label: `${t}s`, major: t % (tickInterval * 2) === 0 })
   }
 
-  const trackHeight = laneCount * (LANE_HEIGHT + LANE_GAP) + LANE_GAP
+  // Lane/bar height shrinks when zoomed far out (see laneHeightFor). Everything in the lane column
+  // derives from this so the gutter, bars, and add-lane rows stay row-aligned.
+  const laneHeight = laneHeightFor(pixelsPerSecond)
+  const trackHeight = laneCount * (laneHeight + LANE_GAP) + LANE_GAP
 
   // Effect display rows (spec 23): overlapping effects stack so both stay visible + grabbable. The
   // Effects track grows to fit the row count; its gutter label matches so the columns stay aligned.
@@ -602,7 +634,7 @@ export default function Timeline({
   // Helper: visual Y position for a lane number
   const laneToY = (lane: number) => {
     const laneIndex = lane - minLane
-    return (laneCount - 1 - laneIndex) * (LANE_HEIGHT + LANE_GAP) + LANE_GAP
+    return (laneCount - 1 - laneIndex) * (laneHeight + LANE_GAP) + LANE_GAP
   }
 
   return (
@@ -644,14 +676,14 @@ export default function Timeline({
               style={{ height: effectsTrackHeight, top: RULER_HEIGHT + CAMERA_TRACK_HEIGHT, color: EFFECT_COLOR }}
               title="Video effects"
             >
-              <IconSparkles size={15} stroke={2} />
+              <IconFilters size={15} stroke={2} />
             </div>
 
             {/* Add lane above CTA (dedicated blank lane row) */}
             <button
               onClick={handleAddLaneAbove}
               className="w-full flex items-center justify-center border-r border-border text-subtle hover:text-accent hover:bg-accent-soft transition-colors cursor-pointer"
-              style={{ height: LANE_HEIGHT }}
+              style={{ height: laneHeight }}
               title="Add lane above"
             >
               <IconPlus size={15} stroke={2.5} />
@@ -669,7 +701,7 @@ export default function Timeline({
                     onClick={() => handleRemoveLane(lane)}
                     disabled={laneCount <= 1}
                     className="absolute left-0 w-full flex items-center justify-center text-subtle hover:text-danger hover:bg-danger-soft disabled:opacity-0 disabled:pointer-events-none transition-colors cursor-pointer"
-                    style={{ top: y, height: LANE_HEIGHT }}
+                    style={{ top: y, height: laneHeight }}
                     title={hasObjects ? 'Remove lane (objects move up)' : 'Remove empty lane'}
                   >
                     <IconX size={14} stroke={2} />
@@ -682,7 +714,7 @@ export default function Timeline({
             <button
               onClick={handleAddLaneBelow}
               className="w-full flex items-center justify-center border-r border-border text-subtle hover:text-accent hover:bg-accent-soft transition-colors cursor-pointer"
-              style={{ height: LANE_HEIGHT }}
+              style={{ height: laneHeight }}
               title="Add lane below"
             >
               <IconPlus size={15} stroke={2.5} />
@@ -1017,7 +1049,7 @@ export default function Timeline({
             </div>
 
             {/* Blank lane spacer for "add above" CTA alignment */}
-            <div style={{ height: LANE_HEIGHT }} />
+            <div style={{ height: laneHeight }} />
 
             {/* Lanes */}
             <div
@@ -1040,7 +1072,7 @@ export default function Timeline({
                   className="absolute w-full"
                   style={{
                     top: laneToY(lane),
-                    height: LANE_HEIGHT,
+                    height: laneHeight,
                     background: i % 2 === 0 ? 'rgba(0,0,0,0.03)' : 'transparent',
                   }}
                 />
@@ -1073,7 +1105,7 @@ export default function Timeline({
                       left,
                       top,
                       width,
-                      height: LANE_HEIGHT,
+                      height: laneHeight,
                       // Lift the WHOLE selected clip above neighbors here (not on the bar body), so the
                       // bar doesn't stack over its own keyframe diamonds and hide them.
                       zIndex: isSelected ? 30 : undefined,
@@ -1088,7 +1120,7 @@ export default function Timeline({
                         style={{
                           right: '100%',
                           width: leftGhostPx,
-                          height: LANE_HEIGHT,
+                          height: laneHeight,
                           background: `repeating-linear-gradient(45deg, ${color} 0, ${color} 3px, transparent 3px, transparent 7px)`,
                           border: `1px dashed ${color}`,
                           borderRight: 'none',
@@ -1107,7 +1139,7 @@ export default function Timeline({
                         style={{
                           left: '100%',
                           width: rightGhostPx,
-                          height: LANE_HEIGHT,
+                          height: laneHeight,
                           background: `repeating-linear-gradient(45deg, ${color} 0, ${color} 3px, transparent 3px, transparent 7px)`,
                           border: `1px dashed ${color}`,
                           borderLeft: 'none',
@@ -1389,7 +1421,7 @@ export default function Timeline({
             </div>
 
             {/* Blank lane spacer for "add below" CTA alignment */}
-            <div style={{ height: LANE_HEIGHT }} />
+            <div style={{ height: laneHeight }} />
 
             {/* Marker guide lines (spec 22) — full-height, through the lanes. zIndex 55 keeps them
                 above the lane bars (≤ 50) but behind the opaque ruler/Camera track (60), so only the
