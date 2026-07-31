@@ -23,9 +23,10 @@ import ImportModal from './ImportModal'
 import ExportModal from './ExportModal'
 import AppearanceControls from './AppearanceControls'
 import HotkeysModal from './HotkeysModal'
+import ChangelogModal from './ChangelogModal'
 import {
   IconDeviceFloppy, IconFolderOpen, IconArrowBackUp, IconArrowForwardUp,
-  IconDownload, IconChevronUp, IconKeyboard, IconCoffee,
+  IconDownload, IconChevronUp, IconKeyboard, IconCoffee, IconHistory,
 } from '@tabler/icons-react'
 
 // Timeline resize/collapse (spec 16 B). Ephemeral view state — not persisted, not part of undo.
@@ -82,6 +83,7 @@ export default function App() {
   const [showImport, setShowImport] = useState(false)
   const [showExport, setShowExport] = useState(false)
   const [showHotkeys, setShowHotkeys] = useState(false)
+  const [showChangelog, setShowChangelog] = useState(false)
   const projectFileRef = useRef<HTMLInputElement>(null)
 
   // Drag-and-drop import (spec 31 B). A window-level drop opens ImportModal pre-staged. `dropFiles`
@@ -707,6 +709,14 @@ export default function App() {
           >
             <IconKeyboard size={16} stroke={2} />
           </button>
+          <button
+            onClick={() => setShowChangelog(true)}
+            title="What's new"
+            aria-label="What's new"
+            className="flex items-center justify-center w-7 h-7 rounded text-muted hover:text-fg hover:bg-surface-hover cursor-pointer transition-colors"
+          >
+            <IconHistory size={16} stroke={2} />
+          </button>
           <a
             href="https://buymeacoffee.com/tmcgry"
             target="_blank"
@@ -861,6 +871,7 @@ export default function App() {
       )}
       {showExport && <ExportModal project={project} onClose={() => setShowExport(false)} />}
       {showHotkeys && <HotkeysModal onClose={() => setShowHotkeys(false)} />}
+      {showChangelog && <ChangelogModal onClose={() => setShowChangelog(false)} />}
 
       {/* Drop-to-import affordance (spec 31 B2). Hidden once the modal is open — the modal has its own
           drop zone. pointer-events-none so it never intercepts the drag/drop events themselves. */}

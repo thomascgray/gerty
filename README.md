@@ -2,7 +2,7 @@
 
 #### A browser-based, open source, free to use video editor.
 
-- No login, no tracking, no ads, no AI, no bullshit
+- - No login, no personalised tracking, no ads, no scraping your data, no AI, no bullshit.
 - Code is fully open source
 - Import images, video clips, audio clips
 - Add custom arrows, shapes, text, all with animated effects, keyframing
