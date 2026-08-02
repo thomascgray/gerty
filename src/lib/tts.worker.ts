@@ -393,9 +393,14 @@ function ensureLoaded(id: number): Promise<void> {
     loaded = (async () => {
       ort.env.wasm.wasmPaths = ORT_WASM_BASE
       ort.env.wasm.simd = true
-      ort.env.wasm.numThreads = (self as unknown as { crossOriginIsolated?: boolean }).crossOriginIsolated
-        ? Math.min(navigator.hardwareConcurrency || 4, 8)
-        : 1
+      // Single-threaded ON PURPOSE. With numThreads > 1, ort spawns Emscripten pthread workers by
+      // re-loading THIS bundled worker chunk; our top-level `ctx.onmessage` then clobbers the handler
+      // the pthread runtime installs, so the pthreads never report ready and the main thread deadlocks
+      // inside InferenceSession.create. It only bites the PRODUCTION bundle (in dev, ort is a separate
+      // optimized-dep module, so its pthread workers load ort's own glue, not our chunk — which is why
+      // it worked locally but hung on Cloudflare). SIMD single-threaded is reliable everywhere and
+      // pocket-tts int8 is light enough to stay usable. (Revisit for speed via a dedicated ort worker.)
+      ort.env.wasm.numThreads = 1
 
       const metaBuf = await fetchModelFile('bundle.json', 0, 6, id)
       meta = JSON.parse(new TextDecoder().decode(metaBuf)) as BundleMeta
@@ -413,6 +418,9 @@ function ensureLoaded(id: number): Promise<void> {
         fetchModelFile('flow_lm_flow_int8.onnx', 3, 6, id),
         fetchModelFile('mimi_decoder_int8.onnx', 4, 6, id),
       ])
+      // Downloads done; compiling the graphs into sessions is the heavy, %-less phase (esp. the 73MB
+      // model single-threaded) — flag it so the UI shows "Preparing…" instead of a frozen download %.
+      ctx.postMessage({ type: 'progress', id, phase: 'prepare' })
       ;[textConditioner, flowLmMain, flowLmFlow, mimiDecoder] = await Promise.all([
         ort.InferenceSession.create(textCondBuf, opts),
         ort.InferenceSession.create(flowMainBuf, opts),

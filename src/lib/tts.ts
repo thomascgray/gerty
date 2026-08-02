@@ -23,6 +23,7 @@ export const DEFAULT_TTS_VOICE = 'alba'
 // files load; `synth` fires per sentence-chunk as audio is generated.
 export type TtsProgress =
   | { phase: 'download'; file?: string; progress?: number }
+  | { phase: 'prepare' } // model files fetched; compiling them into inference sessions (no % — opaque)
   | { phase: 'synth'; done: number; total: number }
 
 export type TtsResult = { blob: Blob; duration: number; sampleRate: number }

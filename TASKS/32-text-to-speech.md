@@ -346,6 +346,23 @@ optional override. Proven locally: fresh `npm run build` → new worker chunk ba
 string gone. Needs commit → PR → master → redeploy, then re-verify the baked URL + DevTools Network.
 The CF `VITE_TTS_MODEL_BASE` var is now inert (can be removed).
 
+[2026-08-03] Prod-only HANG at "67%" fixed (worked in dev, deadlocked on Cloudflare). Root cause:
+onnxruntime-web multi-threading. With numThreads>1, ort spawns Emscripten pthread workers by
+RE-LOADING this bundled worker chunk; our top-level `ctx.onmessage` then clobbers the handler the
+pthread runtime installs → pthreads never report ready → main thread deadlocks inside
+`InferenceSession.create` (Network confirmed: all model files 200, ort wasm loaded, ~8 repeated
+tts.worker chunk loads = the pthreads, and NO tokenizer/voices fetch = frozen mid-compile, no error).
+Dev escaped it because ort is a separate optimized-dep module there, so its pthreads load ort's own
+glue, not our chunk. Fix: `ort.env.wasm.numThreads = 1` (single-threaded SIMD; reliable everywhere,
+pocket-tts int8 stays usable). Trade-off: slower than the threaded local run (~1.5x RTFx) — revisit
+via a dedicated ort worker if speed matters. Also improved progress UX: added a `prepare` phase so the
+modal shows "Preparing voice model…" during the (now longer, single-threaded) compile instead of a
+frozen "67%". Files: `src/lib/tts.worker.ts`, `src/lib/tts.ts`, `src/components/TtsModal.tsx`. Build
+verified: numThreads=1 + R2 URL both baked. Needs commit → PR → deploy → retest.
+- Side note (user asked): weights re-download on each page refresh because the R2 objects have no
+  strong browser-cache headers (Cf-Cache-Status DYNAMIC). Expected for now; fix later by setting
+  Cache-Control: immutable on the R2 objects (or a CF cache rule). Not blocking.
+
 ## Open follow-up: model hosting
 
 Currently the model files load from huggingface.co (cached in browser Cache Storage after first load →

@@ -183,6 +183,11 @@ export default function TtsModal({ mode, initial, onClose, onConfirm }: TtsModal
                   <span>Downloading voice model{progress.progress != null ? ` · ${Math.round(progress.progress)}%` : '…'}</span>
                   <span className="text-subtle text-[11px]">One-time download; it's cached for next time.</span>
                 </div>
+              ) : progress?.phase === 'prepare' ? (
+                <div className="flex flex-col gap-1">
+                  <span>Preparing voice model…</span>
+                  <span className="text-subtle text-[11px]">Compiling on your CPU; the first run can take a little while.</span>
+                </div>
               ) : progress?.phase === 'synth' ? (
                 <span>Synthesizing… {progress.done}/{progress.total}</span>
               ) : (
