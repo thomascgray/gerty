@@ -90,10 +90,10 @@ export default function ExportModal({ project, onClose }: ExportModalProps) {
           <p className="text-xs text-subtle mt-1">Quality does not affect export speed.</p>
         </div>
 
-        {/* Estimated size */}
+        {/* Estimated size — an upper bound: VBR (spec 30) lets simple content come in under. */}
         <div className="flex items-baseline justify-between mb-5 px-3 py-2 bg-surface-muted rounded border border-border">
           <span className="text-sm text-muted">Estimated size</span>
-          <span className="text-sm font-semibold text-fg">≈ {formatBytes(estBytes)}</span>
+          <span className="text-sm font-semibold text-fg">up to ~{formatBytes(estBytes)}</span>
         </div>
 
         {isExporting && (

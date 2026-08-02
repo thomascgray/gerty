@@ -609,6 +609,10 @@ async function findSupportedVideoCodec(
       height,
       bitrate,
       framerate,
+      // VBR (spec 30 A4): the source-anchored bitrate is an AVERAGE, so easy content
+      // (e.g. a mostly-static screen recording) is allowed to undershoot it — the file
+      // lands at or below the size estimate, never above.
+      bitrateMode: 'variable',
     }
 
     try {

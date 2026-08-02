@@ -1,16 +1,36 @@
-# 30 — Quality-based export encoding (QP / "CRF" mode)
+# 30 — Efficient export encoding (source-anchored ABR, with a QP phase-2)
+
+> **Status (2026-08-02):** unimplemented, and re-scoped. The original draft of this
+> spec made **quantizer/QP targeting** the core change. After review the direction
+> flipped: **Phase 1 is a low-risk "smarter ABR" fix** that keeps average-bitrate
+> mode (and therefore keeps the size estimate exact), and simply stops asking for a
+> target wildly larger than the content justifies. **QP is preserved as Phase 2**
+> (§E) — genuinely more efficient, but higher risk (unbounded memory, browser-support
+> surface, and it *destroys* the pre-export estimate the user explicitly wants to keep).
+>
+> Two user goals drive the re-scope: **(1) export as efficiently as possible**, and
+> **(2) the estimated MB should be closer — "even if it's not perfect, closer is
+> better."** These pull apart slightly: QP maximizes (1) but makes (2) structurally
+> impossible; ABR keeps (2) exact but can't undershoot on easy content the way QP can.
+> Phase 1 captures most of (1) and all of (2); Phase 2 chases the rest of (1) later.
 
 ## Overview
 
-Export currently targets an **absolute average bitrate** derived from pixel count alone:
+Export targets an **absolute average bitrate** derived from pixel count alone:
 
 ```
-bitrate = width × height × fps × bpp        // exportSettings.ts:128-135
+bitrate = width × height × fps × bpp        // exportSettings.ts:127-135
 ```
 
-Nothing in that formula knows what the content *is*. A screen recording — mostly static pixels, near-empty P-frames — is charged exactly the same as live-action footage. The encoder is configured with `bitrate` only ([ffmpegExport.ts:606-612](src/lib/ffmpegExport.ts#L606-L612)), which puts it in average-bitrate mode: it does not come in under budget on easy content, it lowers the quantizer until it spends the money.
+Nothing in that formula knows what the content *is*. A screen recording — mostly
+static pixels, near-empty P-frames — is charged exactly the same per pixel as
+live-action footage. Worse, the target ignores the **source we already imported**:
+we know a re-exported clip's own bitrate (from its asset `size` ÷ `duration`), yet we
+happily ask the encoder for many times that.
 
-**The bug this causes (the motivating repro):** a 57 MB, 11-minute, 1080×716 screen recording (≈0.69 Mbps, encoded by its recorder in quality mode) imported and immediately re-exported:
+**The motivating repro:** a 57 MB, 11-minute, 1080×716 screen recording
+(≈0.69 Mbps, encoded by its recorder in quality mode) imported and immediately
+re-exported:
 
 | | output pixels | target bitrate | estimate |
 |---|---|---|---|
@@ -18,199 +38,394 @@ Nothing in that formula knows what the content *is*. A screen recording — most
 | export @ "1080p" / Social | 1920×1080 | 6.22 Mbps | **513 MB** |
 | export @ "480p" / Social | 854×480 | 1.23 Mbps + audio | **112 MB** |
 
-Even at **one sixth the pixels** the app asks for nearly **double** the source's bitrate. The content is never consulted.
+Even at **one sixth the pixels** the app asks for nearly **double** the source's
+bitrate, and the "Estimated size" row faithfully reports that absurd number — so the
+estimate isn't lying, the *target* is wrong, and the estimate is only as sane as the
+target it multiplies.
 
-This spec replaces bitrate targeting with **quantizer (QP) targeting** — the WebCodecs equivalent of x264's CRF — so easy content costs few bits and hard content costs many, which is what every other encoder in the world does and what users already believe the "Compression" chips mean.
+**Phase 1 (this spec's core)** replaces the content-blind target with a
+**source-anchored ABR target**: cap the requested bitrate at roughly what the richest
+imported video source actually carried (modulated per compression preset), and keep
+today's `bpp` formula only as the ceiling / no-source fallback. Because we stay in
+average-bitrate mode, `estimateExportBytes` still multiplies a real target by duration
+— so the estimate stays **exact in form and finally sane in value**. This is the whole
+"closer estimate" win, achieved by fixing the target rather than by inventing a fuzzier
+estimator.
 
-**Scope note:** the same repro also exposes a *second*, independent bug — the project canvas is 1920×1080 while the source is 1080×716, so "1080p" export upscales by 2.7× in area. That is **out of scope here** (see §D3 and Related Systems).
+**Phase 2 (§E, deferred)** is the original QP design: per-frame quantizer targeting for
+true content-adaptive efficiency, at the cost of the pre-export estimate. Kept in full
+so the analysis isn't lost, but explicitly out of scope for the first landing.
+
+**Scope notes:**
+- The same repro also exposes a *second*, independent bug — the project canvas is
+  1920×1080 while the source is 1080×716, so "1080p" export upscales by 2.7× in area.
+  Still **out of scope** (see §D2). Phase 1 mitigates its *size* fallout for free
+  (the source-anchored cap doesn't grant more bits just because we upscaled), but does
+  not fix the upscale itself.
+- The **per-object Download** re-encode ([objectDownload.ts](src/lib/objectDownload.ts))
+  has the *same* content-blind bitrate bug (hardcoded `0.1` bpp,
+  [objectDownload.ts:407-409](src/lib/objectDownload.ts#L407-L409)) and a **third copy**
+  of `findSupportedVideoCodec`. Per the scoping decision it is **out of scope** here
+  (§D3), but it is the obvious next consumer of the same helper.
 
 ## Requirements
 
-### A. Encoding core
+### A. Source-anchored ABR target (Phase 1 core)
 
-- **A1.** When the browser supports it, the WebCodecs export paths configure the encoder with `bitrateMode: 'quantizer'` and **omit `bitrate`**, then pass a per-frame quantizer via `encode(frame, { keyFrame, avc: { quantizer } })`.
-- **A2.** Each existing `CompressionPreset` maps to an H.264 QP (0–51, lower = better) instead of / in addition to its `bpp`. Proposed mapping, mirroring x264 CRF convention:
+- **A1. Derive a source bitrate for the project.** From the video assets actually used
+  by non-hidden `video` objects, compute each asset's own bitrate as
+  `assetBitrate = size × 8 / duration` (bytes → bits, using `AssetMeta.size` and
+  `AssetMeta.duration`; skip assets with no/zero `duration`). The project's
+  `sourceBitrate` is the **max** across those assets (the richest input is the one we
+  must not starve). Projects with no usable video source → `sourceBitrate = 0`.
+  - Rationale for **max** (not sum or average): clips play sequentially in time, and
+    we're picking a single per-second target. The busiest source sets the bar; anything
+    lower re-encodes comfortably under it.
+  - `assetBitrate` includes the source's audio track — acceptable slop for a "closer,
+    not perfect" target. Documented, not corrected (see Open Questions Q3).
 
-  | preset | label | QP | bpp (retained, see A5) |
+- **A2. Cap the target at a preset-scaled multiple of the source bitrate.** When
+  `sourceBitrate > 0`:
+
+  ```
+  videoBitrate = min( bppTarget , sourceBitrate × headroom(preset) )
+  ```
+
+  where `bppTarget = width × height × fps × bpp(preset)` (today's formula, unchanged)
+  and `headroom(preset)` is a small per-preset factor. Proposed:
+
+  | preset | label | bpp (retained) | headroom |
   |---|---|---|---|
-  | `studio` | Studio | 18 | 0.20 |
-  | `social` | Social Media | 23 | 0.10 |
-  | `web` | Web | 28 | 0.05 |
-  | `web-low` | Web (Low) | 33 | 0.025 |
+  | `studio` | Studio | 0.20 | 1.5 |
+  | `social` | Social Media | 0.10 | 1.0 |
+  | `web` | Web | 0.05 | 0.7 |
+  | `web-low` | Web (Low) | 0.025 | 0.5 |
 
-- **A3.** **Keyframes get a lower QP than inter frames.** Constant-QP is not CRF and has no built-in I:P ratio, so keyframes must be biased manually — `quantizer = clamp(isKeyFrame ? qp - 3 : qp, 0, 51)`. The frame loops already compute `isKeyFrame` ([ffmpegExport.ts:388](src/lib/ffmpegExport.ts#L388), [exportWorker.ts:197](src/lib/exportWorker.ts#L197)), so this is a one-line change at each call site.
-- **A4.** **Support probe.** Quantizer mode must be probed via `VideoEncoder.isConfigSupported({ ..., bitrateMode: 'quantizer' })` inside the codec ladder. If no codec supports it, fall back cleanly to today's ABR config for the same preset.
-- **A5.** **The `bpp` table is retained, not deleted** — it is the fallback ladder for A4 and the only knob the MediaRecorder path has (§A6). Nothing about today's behaviour is removed; it becomes the second tier.
-- **A6.** **MediaRecorder fallback is unchanged.** `MediaRecorder` exposes only `videoBitsPerSecond` ([ffmpegExport.ts:748-751](src/lib/ffmpegExport.ts#L748-L751)) — there is no quantizer concept. It keeps the bpp math. This means Firefox output size will differ from Chromium output size for the same settings; that divergence must be documented, not hidden.
-- **A7.** All three encode paths must agree on the resolved config. `findSupportedVideoCodec` is currently **duplicated** in [ffmpegExport.ts:590](src/lib/ffmpegExport.ts#L590) and [exportWorker.ts:333](src/lib/exportWorker.ts#L333); the quantizer-aware version should be written **once** in a shared DOM-free module (`exportSettings.ts` already declares itself pure/DOM-free and is imported by both) rather than forked a third time.
+  So Studio keeps headroom above the source (room for the composited annotations/effects
+  that the source never had), Social ≈ matches the source, and the Web tiers deliberately
+  come in **under** it. The `min(...)` means the cap only ever *lowers* the target — a
+  genuinely demanding output (small source, huge canvas, heavy motion graphics) still
+  gets the full `bppTarget`.
+  - **No resolution-scaling term is needed.** The source bitrate already encodes the
+    source's own resolution, and re-encoding cannot manufacture detail the source lacked;
+    capping near source bitrate is therefore correct whether we output smaller *or*
+    larger than the source. (This is why the missing source-dimension metadata, §Technical
+    Considerations, doesn't matter.)
 
-### B. Presenting it to the user
+- **A3. No-source fallback is exactly today's behaviour.** When `sourceBitrate = 0`
+  (pure annotation / text / shapes / photo projects, or audio-only), fall back to the
+  unmodified `bppTarget`. **Nothing about today's output changes for those projects.**
+  (These projects *also* over-charge — vector/text content compresses to almost nothing —
+  but there is no source to anchor to; a lower default bpp for the no-source case is left
+  to Open Questions Q4, not assumed here.)
 
-- **B1. The Compression chips do not change.** They are already framed as quality ("Compression is almost impossible to notice"), not as bitrate. Studio / Social Media / Web / Web (Low) keep their labels, order, default, and blurbs. **No new control is added for the quality knob** — only its meaning becomes true.
-- **B2. The static "Estimated size" row is removed.** Under QP there is no bitrate to multiply by duration; `estimateExportBytes` cannot be computed ahead of time without encoding. Keeping a number that is now structurally a fiction is worse than showing none.
-- **B3. It is replaced by a one-line expectation-setter** in the Compression block, e.g.:
-  > Final size depends on what's in the video — screen recordings and simple animation come out far smaller than live-action footage.
-- **B4. A live, measured size readout during export.** The progress UI gains an actual byte count and a projection, sourced from the encoded chunks the pipeline already accumulates (`videoChunks[].data.byteLength`):
-  > `Encoding… 34% · 61 MB so far, projecting ≈ 180 MB`
+- **A4. Bitrate mode is `'variable'` (decided).** Today the code sets `bitrate` and leaves
+  `bitrateMode` at the browser default. Phase 1 sets it explicitly to **`'variable'`**
+  (VBR) in the encoder config so easy content is *allowed* to undershoot the (now sane)
+  target — this is where the remaining efficiency comes from (a mostly-static screen
+  recording spends less on its easy seconds). Consequence for the estimate: the output
+  lands **at or below** the estimate, never above, so the estimate is worded as a
+  trustworthy **upper bound** ("up to ~X"), not a bullseye. CBR (`'constant'`) was
+  considered and rejected: it would make the estimate exact but pad the easy footage,
+  costing the efficiency that is half the point of this spec.
 
-  This is strictly **better** than the estimate it replaces — it is a measurement, not a guess, and it would have surfaced the motivating bug faster and more honestly. It requires widening the progress callback from `(pct: number)` to carry bytes, through both the main-thread path and the worker `progress` message.
-- **B5. (Recommended, phase 2) "Target size" advanced mode.** ABR has exactly one genuine virtue — **predictable output size** — and real users need it (Discord 10/25 MB, email caps, upload limits). Rather than delete that capability, expose it honestly behind a disclosure in the modal:
+- **A5. The estimate is kept, not removed.** `estimateExportBytes` continues to compute
+  `(videoBitrate + audioBitrate) × duration / 8`, now over the source-anchored
+  `videoBitrate`. No new estimator, no heuristic fudge — the existing exact-form estimate
+  simply stops being multiplied by an absurd target. The ExportModal "Estimated size" row
+  **stays**, reworded to an upper bound ("up to ~X" / "≈") since A4's VBR mode lets the
+  real file come in under it.
 
-  ```
-  Quality      [Studio] [Social Media] [Web] [Web (Low)]
-               Final size depends on what's in the video…
+- **A6. One target policy, used by every ABR consumer in scope.** The new logic lives in
+  `exportSettings.ts` (already pure / DOM-free, already imported by both the main-thread
+  export and the module worker). `resolveEncodeConfig`, `videoBitrateFor`, and
+  `estimateExportBytes` must all resolve the **same** source-anchored number, so the
+  estimate and the encode can never disagree. This needs the `Project` in scope where the
+  bitrate is computed (it already is — `resolveEncodeConfig(project, settings)`).
 
-               ▸ Need a specific file size?
-  ```
+### B. Encoding paths
 
-  Expanded, this swaps the quality chips for a size input and back-computes the bitrate (`bitrate = target_bytes × 8 / duration − audio`), reusing the existing ABR path verbatim. `ExportSettings` becomes a discriminated union (§Technical Considerations). This is a **better** product than today's compression chips for that use case, because the user states the constraint they actually have.
+- **B1. Both WebCodecs paths pass the source-anchored bitrate + explicit mode.** The
+  main-thread ([ffmpegExport.ts:302](src/lib/ffmpegExport.ts#L302)) and worker
+  ([exportWorker.ts:137](src/lib/exportWorker.ts#L137)) encoder configs already receive
+  `videoBitrate` via `EncodeConfig`; they additionally set `bitrateMode` per A4. The
+  per-frame keyframe cadence and the `encode(frame, { keyFrame })` call sites are
+  **unchanged** (no `avc.quantizer` in Phase 1).
+- **B2. MediaRecorder fallback** ([ffmpegExport.ts:748-751](src/lib/ffmpegExport.ts#L748-L751))
+  passes the same source-anchored `videoBitrate` as `videoBitsPerSecond`. It already only
+  had this one knob; it simply gets the better number. No behavioural split to document
+  (unlike the QP phase, where Firefox would have diverged).
+- **B3. `findSupportedVideoCodec` may set `bitrateMode`.** It is duplicated in
+  [ffmpegExport.ts:590](src/lib/ffmpegExport.ts#L590) and
+  [exportWorker.ts:333](src/lib/exportWorker.ts#L333) (and a third time in
+  [objectDownload.ts:412](src/lib/objectDownload.ts#L412), out of scope §D3). Phase 1 does
+  **not** require the dedup — passing `bitrateMode` through the existing signature is a
+  smaller change. Consolidating the two in-scope copies into `exportSettings.ts` is
+  **recommended but optional** here, and becomes load-bearing in Phase 2. If touched,
+  move it to the shared module rather than forking a fourth copy.
 
-### C. Safety and limits — the real risk of this change
+### C. Behaviour to preserve
 
-- **C1. Output size becomes unbounded.** Today `bpp` caps the encode. Under QP, `videoChunks` ([ffmpegExport.ts:305](src/lib/ffmpegExport.ts#L305), [exportWorker.ts:140](src/lib/exportWorker.ts#L140)) holds the **entire encoded stream in RAM** as `Uint8Array`s before muxing, and `mp4-muxer`'s `ArrayBufferTarget` then materialises a **second full copy**. An 11-minute Studio-QP export of complex live-action footage could plausibly exceed 1 GB × 2 and OOM the tab. This is the most serious consequence of the change and must be handled, not discovered.
-- **C2.** Implement at minimum a **running byte guard**: if accumulated encoded bytes cross a threshold (proposal: warn at 1 GB, hard-stop with a clear error at 2 GB), surface it in the UI rather than crashing. The live counter from B4 makes this nearly free.
-- **C3. Noisy effects become expensive.** Spec 23's `grain` and `oldfilm` inject per-pixel noise, which is close to incompressible. Under ABR that noise merely stole quality from the rest of the frame; under QP it **multiplies file size**. Behaviour change worth flagging (see Open Questions Q4).
-- **C4.** Cancel, progress monotonicity, and the existing tier fallbacks (worker → main thread → MediaRecorder) must survive unchanged.
+- **C1. The Compression chips do not change** — labels, order, default (`social`), blurbs.
+  Their meaning becomes *truer*: the preset now genuinely trades source-fidelity headroom,
+  not just an abstract bpp.
+- **C2. Cancel, progress monotonicity, tier fallbacks** (worker → main thread →
+  MediaRecorder) all behave exactly as today. Phase 1 changes only the *number* fed to the
+  encoder, not the pipeline shape — so there is essentially no new failure surface.
+- **C3. No memory-ceiling risk.** Because Phase 1 stays in average-bitrate mode with a
+  *lower* target than today, `videoChunks` RAM use only ever **decreases**. The unbounded-
+  output hazard is a Phase-2/QP concern (§E C1), not a Phase-1 one.
+- **C4. `estimateExportBytes` stays live** and its only caller (ExportModal) is untouched
+  structurally.
 
-### D. Non-goals
+### D. Non-goals (Phase 1)
 
 - **D1.** No change to `renderFrame`, camera, effects, audio mixing, or the muxer.
-- **D2.** No change to resolution options, fps, or the audio bitrate (128 kbps AAC).
-- **D3.** **Not fixing the canvas/source dimension mismatch.** Importing a 1080×716 video into a 1920×1080 project and exporting "1080p" still upscales. Separate spec.
-- **D4.** No format changes (MP4/WebM/GIF) — that's spec 27.
+- **D2.** **Not** fixing the canvas/source dimension mismatch (importing 1080×716 into a
+  1920×1080 project still upscales on export). Separate spec — see Related Systems.
+- **D3.** **Not** touching the per-object Download re-encode
+  ([objectDownload.ts](src/lib/objectDownload.ts)), per the scoping decision. It shares the
+  bug and would be the natural next consumer of A6's helper, but is deliberately excluded to
+  keep the blast radius small.
+- **D4.** No QP / quantizer mode (that is §E, Phase 2).
+- **D5.** No resolution/fps/format changes; audio stays 128 kbps AAC.
 
 ## Technical Considerations
 
-### Types already exist — no shims needed ✅
+### Data available for the source-anchored target ✅
 
-Verified against the installed toolchain (TypeScript `~5.9.3`, `lib: ["ES2022","DOM","DOM.Iterable"]`). `lib.dom.d.ts` already ships everything required:
+`AssetMeta` ([types.ts:402-412](src/types.ts#L402-L412)) carries `size: number` (bytes)
+and `duration?: number` (seconds) — everything A1 needs:
 
 ```ts
-// lib.dom.d.ts:39418
-type VideoEncoderBitrateMode = "constant" | "quantizer" | "variable";
-
-// lib.dom.d.ts:2416-2423
-interface VideoEncoderEncodeOptions {
-    avc?: VideoEncoderEncodeOptionsForAvc;
-    keyFrame?: boolean;
-}
-interface VideoEncoderEncodeOptionsForAvc {
-    quantizer?: number | null;
+export type AssetMeta = {
+  id: string
+  type: AssetType
+  filename: string
+  mimeType: string
+  size: number       // bytes
+  duration?: number  // seconds (audio/video length)
+  // ...animated-image fields
 }
 ```
 
-⚠️ One thing to confirm on first compile: `@types/dom-webcodecs` (a transitive dep of `mp4-muxer`) declares its own global `VideoEncoderEncodeOptions` with **only** `keyFrame`. Global interfaces *merge*, so the union should still expose `avc` — but `tsconfig.app.json` sets `"types": ["vite/client"]`, so whether that package is in scope at all depends on `mp4-muxer`'s triple-slash references. Confirm with `npx tsc -b` immediately after the first `avc: { quantizer }` call site; if it fails, a local interface augmentation is the fix, not a cast.
+`video` objects carry `data.assetId` ([types.ts:189-199](src/types.ts#L189-L199)), so the
+used-asset set is `objects.filter(o => o.type === 'video' && !o.hidden).map(o => o.data.assetId)`.
+
+⚠️ **No source width/height is stored** anywhere in `AssetMeta` — which is why A2 anchors on
+bitrate directly and needs no resolution-scaling term. If a future refinement wants
+resolution-aware capping it must first thread source dimensions through import (out of scope).
 
 ### Current types to change
 
-`exportSettings.ts`:
+`exportSettings.ts` — add `headroom` to the preset table and a source-bitrate helper:
 
 ```ts
-export type CompressionPreset = 'studio' | 'social' | 'web' | 'web-low'
-
 type CompressionSpec = {
   id: CompressionPreset
   label: string
-  bpp: number        // retained — ABR fallback + MediaRecorder
-  qp: number         // NEW — H.264 quantizer, 0–51
+  bpp: number        // retained — no-source fallback + MediaRecorder + the min() ceiling
+  headroom: number   // NEW — source-anchor multiplier (A2)
   blurb: string
 }
 
-export type ExportSettings = {
-  shortEdge: number
-  compression: CompressionPreset
-}
+/** Richest used-video source bitrate (bits/sec), or 0 if the project has no usable video. */
+export function projectSourceBitrate(project: Project): number { /* A1 */ }
 ```
 
-`EncodeConfig` — [exportWorkerTypes.ts:12-16](src/lib/exportWorkerTypes.ts#L12-L16), structured-cloned to the worker:
+`resolveEncodeConfig` keeps its **shape** — `{ width, height, videoBitrate }` — so
+`EncodeConfig` ([exportWorkerTypes.ts:12-16](src/lib/exportWorkerTypes.ts#L12-L16)) does
+**not** need the discriminated-union rework the QP phase required. Only the computation of
+`videoBitrate` changes. (Phase 2 is where `EncodeConfig` grows a `mode`.)
+
+`videoBitrateFor` gains the project/source-bitrate input, or a sibling
+`resolveVideoBitrate(project, width, height, fps, preset)` is added and both
+`resolveEncodeConfig` and `estimateExportBytes` route through it (A6).
+
+### The estimate is honest again, for free
+
+Today's `estimateExportBytes` doc-comment already claims "*accurate to within codec
+overhead because the encoder targets this same bitrate*". Under Phase 1 that stays true —
+same formula, same code path — the only thing that changed upstream is that
+`videoBitrate` is now source-anchored. With A4's VBR mode the actual file lands **≤** the
+estimate on easy content, so the estimate becomes a slightly-generous upper bound rather
+than a fiction. This is precisely the "closer is better" outcome, with no new estimator to
+justify.
+
+### Browser support
+
+Phase 1 uses only APIs already in use (`bitrate`, and `bitrateMode` which is a
+long-standing `VideoEncoderConfig` field). No new capability probe is required — unlike
+Phase 2's per-frame quantizer. `VideoEncoderBitrateMode = "constant" | "quantizer" |
+"variable"` is already in `lib.dom.d.ts`.
+
+## Related Systems and Tasks
+
+- **[SPECS/27-expand-export-options.md](SPECS/27-expand-export-options.md)** — format
+  selection (WebM/GIF). Both specs thread export knobs through
+  `ExportSettings → resolveEncodeConfig → EncodeConfig`. Phase 1 does **not** change
+  `EncodeConfig`'s shape, so no coordination is needed for it; Phase 2 (which does) should
+  coordinate with 27.
+- **[objectDownload.ts](src/lib/objectDownload.ts)** — the per-object Download re-encode:
+  same content-blind bitrate (`bitrateFor`, [line 407](src/lib/objectDownload.ts#L407)) and
+  a third `findSupportedVideoCodec` copy. **Out of scope (D3)** but the obvious follow-up.
+- **[SPECS/09-in-video-perf.md](SPECS/09-in-video-perf.md)** — the export worker; Phase 1's
+  bitrate change lands in it too (the worker already imports `exportSettings.ts`).
+- **Canvas-size mismatch (no spec yet)** — nothing in the import path sets project
+  dimensions from an imported video; `useProject` seeds from `canvasSizePref` localStorage,
+  defaulting to 1920×1080 ([useProject.ts:352](src/hooks/useProject.ts#L352)). So
+  `resolutionOptions` reads the *canvas*, not the asset, and offers "1080p" for 716px-tall
+  source (D2). Worth its own spec.
+- **CLAUDE.md** — `ffmpegExport.ts` is misnamed; it is the WebCodecs + `mp4-muxer` path.
+
+## Decided
+
+- **Headroom factors = 1.5 / 1.0 / 0.7 / 0.5** (Studio / Social / Web / Web-Low), per the A2
+  table. These are the **starting** values; the user will run real exports and adjust if the
+  quality invariant slips (Studio must stay visually indistinguishable from the source; the
+  presets must stay monotonic in size and quality). Tuning them is a one-line change to the
+  preset table, not a design change.
+- **`bitrateMode: 'variable'` (VBR)** — see A4. Estimate is presented as an upper bound.
+
+## Open Questions
+
+3. **Audio bytes in `assetBitrate` (A1).** The source `size` includes its audio track, so
+   `assetBitrate` slightly overstates the *video* source bitrate — which only makes the cap
+   a touch generous (safe). Correct it (subtract a nominal audio bitrate) or accept the
+   slop? → **Lean accept**; "closer, not perfect" is the explicit bar.
+4. **Should the no-source case (A3) also get a lower bpp?** Pure annotation/text/photo
+   projects over-charge today too, but have no source to anchor to. Options: (a) leave
+   today's bpp (this spec's default — zero regression risk); (b) add a lower `bpp` floor for
+   the no-source path. → **Lean (a)** for Phase 1; (b) is a cheap follow-up once (a) is
+   validated.
+5. **Does the ExportModal copy need any change beyond "≈ → up to"?** The existing blurbs
+   frame compression as quality, which stays true. → probably a one-word tweak, if that.
+
+## Acceptance Criteria
+
+- **AC1. (The motivating repro.)** Import the 57 MB / 11-min / 1080×716 screen recording,
+  export at native resolution / **Social Media** with no edits. Output lands in the **same
+  order of magnitude as the source** — target ≤ ~2× (≈120 MB), versus 513 MB today — with no
+  visible quality loss versus the source. The **Estimated size row shows a number in that
+  same range**, not 513 MB.
+- **AC2.** **Studio** is visually indistinguishable from the source; **Web (Low)** produces a
+  materially smaller file; presets stay **monotonic** in size and quality.
+- **AC3.** A **no-video project** (annotations / text / photos only) exports **byte-identical
+  to today** — the source-anchor path is skipped (A3), so there is zero regression where
+  there is no source to anchor to.
+- **AC4.** The **estimate matches the delivered file** to within codec overhead (CBR) or is a
+  slightly-generous upper bound the file comes in under (VBR) — never off by an order of
+  magnitude as today. Verified in-browser by comparing the modal's number to the downloaded
+  file size.
+- **AC5.** Worker path, main-thread path, MediaRecorder fallback, and cancel all behave as
+  before; progress remains monotonic and reaches 100%.
+- **AC6.** `npx tsc -b` stays green. Verify per
+  [.claude/skills/verify/SKILL.md](.claude/skills/verify/SKILL.md) — static checks by Claude,
+  browser click-list for the user; no dev server run by Claude.
+
+## Implementation Notes
+
+Suggested order — each step independently verifiable:
+
+1. **`exportSettings.ts`** — add `headroom` to each `CompressionSpec`; add
+   `projectSourceBitrate(project)` (A1) and a `resolveVideoBitrate(...)` that applies the A2
+   `min(bppTarget, sourceBitrate × headroom)` (falling back to `bppTarget` when
+   `sourceBitrate === 0`). Route both `resolveEncodeConfig` and `estimateExportBytes` through
+   it (A6). This step alone makes the estimate correct and is verifiable by reading the modal
+   number before any encoder change.
+2. **`ffmpegExport.ts` / `exportWorker.ts`** — set `bitrateMode` (A4) in the encoder config
+   (via `findSupportedVideoCodec` or at the `configure` site). The `videoBitrate` they
+   receive is already the new number from step 1. Leave the frame loops and
+   `encode(frame, { keyFrame })` untouched.
+3. **MediaRecorder path** — no code change beyond receiving the new `videoBitrate` (B2);
+   confirm it still reads `encode.videoBitrate`.
+4. **`ExportModal.tsx`** — optional one-word copy tweak on the estimate row per Q2/Q5. No
+   structural change; `estimateExportBytes`, `totalDurationOf`, `formatBytes` all stay.
+5. **(Optional) dedup `findSupportedVideoCodec`** into `exportSettings.ts` (B3) — nice-to-have
+   in Phase 1, prerequisite for Phase 2.
+
+Do **not** invent a separate heuristic estimator. The estimate is already exact-in-form; the
+entire fix is to feed it a sane target. Any parallel "guessing" estimator would reintroduce
+the confident-fiction problem this spec removes.
+
+---
+
+## E. Phase 2 (deferred) — Quantizer / QP targeting
+
+> Preserved from the original spec draft. **Out of scope for the first landing** — it is
+> genuinely more efficient than Phase 1 on easy content, but (a) it *removes* the pre-export
+> estimate the user wants to keep, (b) it makes output size unbounded (a real OOM risk that
+> must be guarded), and (c) it adds a browser-support probe and a Firefox/Chromium size
+> divergence. Revisit once Phase 1 is validated and if the residual efficiency gap matters.
+
+### E-A. Encoding core (QP)
+
+- **A1.** Where supported, configure the WebCodecs encoder with `bitrateMode: 'quantizer'`
+  and **omit `bitrate`**, passing a per-frame quantizer via
+  `encode(frame, { keyFrame, avc: { quantizer } })`.
+- **A2.** Each `CompressionPreset` maps to an H.264 QP (0–51, lower = better). Proposed,
+  mirroring x264 CRF convention: `studio` 18, `social` 23, `web` 28, `web-low` 33. The `bpp`
+  table is **retained** as the fallback ladder + MediaRecorder knob.
+- **A3.** Keyframes get a lower QP than inter frames (constant-QP has no built-in I:P ratio):
+  `quantizer = clamp(isKeyFrame ? qp - 3 : qp, 0, 51)`. The frame loops already compute
+  `isKeyFrame` ([ffmpegExport.ts:388](src/lib/ffmpegExport.ts#L388),
+  [exportWorker.ts:197](src/lib/exportWorker.ts#L197)).
+- **A4.** Probe quantizer support via
+  `VideoEncoder.isConfigSupported({ ..., bitrateMode: 'quantizer' })`; if unsupported, fall
+  back to Phase-1 source-anchored ABR for the same preset.
+- **A7.** Write the quantizer-aware `findSupportedVideoCodec` **once** in `exportSettings.ts`
+  and delete the (now three) duplicated copies — ffmpegExport, exportWorker, **and**
+  objectDownload.
+
+### E-B. Presenting it (QP)
+
+- **B2 (the reason QP is Phase 2).** Under QP there is no bitrate to multiply by duration, so
+  the exact `estimateExportBytes` cannot be computed ahead of time. The original plan was to
+  **remove** the estimate and replace it with a **live measured byte counter** during export
+  (`Encoding… 34% · 61 MB so far, projecting ≈ 180 MB`), sourced from
+  `videoChunks[].data.byteLength`. This is honest but directly conflicts with the user's
+  "keep a closer estimate" goal — hence Phase 1 exists. If Phase 2 ever lands, the live
+  counter is the right presentation and should be **added alongside** Phase 1's pre-export
+  estimate, not instead of it.
+- **B5. "Target size" advanced mode** (Discord 10/25 MB, email caps): expose an optional size
+  input that back-computes a bitrate (`bitrate = target_bytes × 8 / duration − audio`) and
+  reuses the ABR path verbatim. `ExportSettings` becomes a discriminated union
+  (`{mode:'quality'} | {mode:'size'}`). Independent of QP; could ship on the Phase-1 ABR base.
+
+### E-C. Safety (QP-only risks)
+
+- **C1. Output size becomes unbounded.** `videoChunks` holds the entire encoded stream in RAM,
+  and `mp4-muxer`'s `ArrayBufferTarget` materialises a second full copy. A long Studio-QP
+  export of complex footage could exceed 1 GB × 2 and OOM the tab. **This risk does not exist
+  in Phase 1** (average-bitrate mode with a lowered target only ever reduces RAM).
+- **C2.** Running byte guard: warn at ~1 GB, hard-stop with a clear error at ~2 GB, surfaced in
+  the UI. The live counter (B2) makes this nearly free.
+- **C3. Noisy effects become expensive under QP.** Spec 23's `grain` / `oldfilm` inject
+  near-incompressible per-pixel noise; under QP that multiplies file size (under ABR it merely
+  stole quality). Flag in the modal; don't silently clamp QP.
+
+### E-D. QP types
+
+`EncodeConfig` would become a discriminated union so a path can't read the wrong knob:
 
 ```ts
-// today
-export type EncodeConfig = { width: number; height: number; videoBitrate: number }
-
-// proposed — a discriminated union so a path can never read the wrong knob
-export type EncodeConfig = {
-  width: number
-  height: number
-} & (
-  | { mode: 'quantizer'; qp: number; videoBitrate: number }  // bitrate kept for the A4/A6 fallbacks
+export type EncodeConfig = { width: number; height: number } & (
+  | { mode: 'quantizer'; qp: number; videoBitrate: number }  // bitrate kept for fallbacks
   | { mode: 'bitrate';   videoBitrate: number }
 )
 ```
 
-Keeping `videoBitrate` populated in both variants is deliberate: the MediaRecorder path (§A6) and the A4 fallback need it regardless of which mode was chosen, and it stays structured-clone-safe.
+`@types/dom-webcodecs` (transitive via `mp4-muxer`) declares a global
+`VideoEncoderEncodeOptions` with only `keyFrame`; global interface **merge** should still
+expose `avc`, but confirm with `npx tsc -b` on the first `avc: { quantizer }` call site — if it
+fails, a local interface augmentation is the fix, not a cast.
 
-If **B5** ships, `ExportSettings` becomes:
-
-```ts
-export type ExportSettings = {
-  shortEdge: number
-} & (
-  | { mode: 'quality'; compression: CompressionPreset }
-  | { mode: 'size';    targetBytes: number }
-)
-```
-
-Progress callback (B4), affecting `exportVideo`, `useFFmpegExport`, and `ExportWorkerResponse`:
-
-```ts
-export type ExportProgress = { pct: number; encodedBytes: number }
-// ExportWorkerResponse: { type: 'progress'; pct: number }  →  + encodedBytes
-```
-
-### Constant QP is not CRF
-
-Worth being precise, because the spec title invites the confusion. `bitrateMode: 'quantizer'` gives **constant QP**, not x264's rate-factor CRF. CRF additionally applies psychovisual adaptation across frame types and motion; constant QP does not. For this feature's goal — *bits spent should follow content complexity* — constant QP is entirely sufficient, and A3's keyframe bias recovers the most important piece of what CRF does for free.
-
-### Browser support
-
-- **Chromium**: `bitrateMode: 'quantizer'` with per-frame `avc.quantizer` — supported.
-- **Safari**: WebCodecs `VideoEncoder` exists (16.4+), quantizer-mode support **unverified**. A4's probe handles it.
-- **Firefox**: no `VideoEncoder` at all → already on MediaRecorder → §A6, unaffected.
-
-Residual risk: `isConfigSupported` could report `supported: true` while the per-frame quantizer is silently ignored, in which case output reverts to whatever default rate control the encoder picks. The B4 live byte counter makes such an anomaly immediately visible rather than silent — which is a further argument for shipping B4 alongside A, not after.
-
-## Related Systems and Tasks
-
-- **[SPECS/27-expand-export-options.md](SPECS/27-expand-export-options.md)** — format selection (WebM/GIF). Both specs thread new fields through `ExportSettings → resolveEncodeConfig → EncodeConfig → worker`. **Coordinate:** if 27 lands first, VP9/Opus need their own quantizer option key (`vp9: { quantizer }`), and `EncodeConfig` should be extended once, not twice. If GIF ships, neither bitrate nor QP applies to it at all.
-- **[SPECS/09-in-video-perf.md](SPECS/09-in-video-perf.md)** — the export worker. C1's memory ceiling is a worker-pipeline concern too; both `videoChunks` accumulators need the guard.
-- **[SPECS/23-more-effects.md](SPECS/23-more-effects.md)** / **[SPECS/25-webgl-effects.md](SPECS/25-webgl-effects.md)** — grain/old-film noise vs. compressibility (C3).
-- **Canvas-size mismatch (no spec yet)** — nothing in the import path sets project dimensions from an imported video; `useProject` seeds from the `canvasSizePref` localStorage value, defaulting to 1920×1080 ([useProject.ts:352](src/hooks/useProject.ts#L352)). `resolutionOptions` therefore reads the *canvas*, not the asset, and happily offers "1080p" for 716px-tall source. Worth its own spec (D3).
-- **CLAUDE.md** — `ffmpegExport.ts` is misnamed; it is the WebCodecs + `mp4-muxer` path, not ffmpeg.wasm.
-
-## Open Questions
-
-1. **Does B5 ("Target size" mode) ship in this spec or as a follow-up?** Shipping A+B1–B4 alone *removes* a capability users currently have (a predictable size number) without replacing it. B5 restores it in a better form. → **Recommend: A + B1–B4 as the core; B5 in the same spec if appetite allows, otherwise immediately after.**
-2. **Are the proposed QP values (18/23/28/33) right?** They follow x264 CRF convention but need one real-world A/B against the motivating 11-minute screen recording plus one live-action clip. Studio at QP 18 on live-action is where the C1 memory risk actually bites — is Studio 18 or 20?
-3. **What are the C2 thresholds**, and is the hard stop an error or a "keep going?" prompt? An aborted 11-minute export at 90% is a miserable outcome; a warning at 1 GB with the option to continue may be better than a hard stop.
-4. **C3 — should noisy effects clamp QP?** Options: (a) do nothing, let grain cost what it costs; (b) clamp QP to a floor when a grain/old-film effect is active; (c) warn in the modal when the project contains one. → **Lean (a) + (c)**: silently overriding the user's chosen quality is worse than telling them.
-5. **Should the live projection (B4) be shown for the MediaRecorder path**, where output size *is* predictable? Probably yes for consistency — a measurement is never wrong.
-6. **Does removing the pre-export estimate need a migration note** anywhere (README mentions the estimate)? Minor, but check.
-
-## Acceptance Criteria
-
-- **AC1. (The motivating repro.)** Import the 57 MB / 11-min / 1080×716 screen recording, export at native resolution / **Social Media** with no edits. Output lands in the **same order of magnitude as the source** — target ≤ ~2× (≈120 MB), versus 513 MB today — with no visible quality loss versus the source.
-- **AC2.** The same project at **Web (Low)** produces a materially smaller file than at **Studio**, and **Studio** is visually indistinguishable from the source. The presets remain monotonic in both size and quality.
-- **AC3.** A live-action / high-motion clip still produces a *large* file at Studio — i.e. the change is genuinely content-adaptive, not a blanket size reduction. (This is the control case; without it AC1 could be satisfied by simply lowering all the bitrates.)
-- **AC4.** On a browser without quantizer support, export still completes via the ABR fallback with today's sizes, and no error is shown.
-- **AC5.** Firefox (MediaRecorder path) still exports successfully.
-- **AC6.** Worker path, main-thread path, and cancel all behave as before; progress remains monotonic and reaches 100%.
-- **AC7.** The Export modal shows no fabricated pre-encode size figure, and during export shows an accurate running byte count whose final value matches the downloaded file's actual size.
-- **AC8.** A deliberately oversized export (Studio, long, complex) either completes or fails with a clear message — it does not crash the tab (C1/C2).
-- **AC9.** `npx tsc -b` stays green. Verify per [.claude/skills/verify/SKILL.md](.claude/skills/verify/SKILL.md) — static checks by Claude, browser click-list for the user; no dev server run by Claude.
-
-## Implementation Notes
-
-Suggested order — each step is independently verifiable:
-
-1. **`exportSettings.ts`** — add `qp` to `CompressionSpec`, add `qpFor(preset)`, widen `EncodeConfig` to the discriminated union, and move a quantizer-aware `findSupportedVideoCodec` here (it is already pure/DOM-free by design, and both `ffmpegExport.ts` and the module worker can import it). Delete the two duplicated copies (A7).
-2. **`ffmpegExport.ts`** — consume the shared probe; in quantizer mode omit `bitrate` from the config and pass `{ keyFrame, avc: { quantizer } }` at [line 389](src/lib/ffmpegExport.ts#L389) with the A3 keyframe bias. Leave `exportWithMediaRecorder` alone.
-3. **`exportWorker.ts`** — mirror step 2 at [line 198](src/lib/exportWorker.ts#L198). Keep the two loops structurally identical; they are already near-copies and drifting them further is the main maintenance hazard here.
-4. **Progress plumbing (B4)** — accumulate `chunk.byteLength` where chunks are pushed (both `output` callbacks already receive them), widen the progress payload, thread through `ExportWorkerResponse` → `exportVideo` → `useFFmpegExport` → `ExportModal`. Add the C2 guard in the same place, since it reads the same counter.
-5. **`ExportModal.tsx`** — remove the estimate row and the `estimateExportBytes` import, add the B3 blurb line, render the live counter in the existing progress block. Keep `totalDurationOf` (still used for the Duration fact tile).
-6. **`estimateExportBytes`** — retain the function only if B5 ships (it back-computes the size↔bitrate relation); otherwise delete it with its only caller.
-
-Do **not** attempt to keep a pre-encode size estimate alive by re-deriving it from QP. There is no closed-form mapping from quantizer to bitrate — that is the entire point of the change, and any number produced that way would be exactly the kind of confident fiction this spec exists to remove.
+*Constant QP is not CRF* — it lacks CRF's psychovisual/frame-type adaptation — but for
+"bits follow content complexity" it is sufficient, and A3's keyframe bias recovers the most
+important piece for free.
 
 ---
-*Ready for implementation once Open Questions 1–3 are decided. Use `/task 30` to begin development.*
+*Phase 1 (§A–D) is ready for implementation — the two blocking decisions (headroom values, VBR)
+are made; the remaining open questions are minor and default-safe. Use `/task 30` to begin
+development. Phase 2 (§E) is deferred and re-opens only if the residual efficiency gap matters
+after Phase 1 ships.*
