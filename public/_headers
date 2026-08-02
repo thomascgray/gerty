@@ -1,0 +1,11 @@
+# Cloudflare Pages headers. Cross-origin isolation is REQUIRED for the TTS engine (spec 32): ONNX
+# Runtime Web uses SharedArrayBuffer for multi-threaded wasm, which the browser only exposes when the
+# document is cross-origin isolated. Without these, TTS still runs but single-threaded (much slower).
+# (In dev these same headers come from vite.config.ts `server.headers`.)
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+
+# The vendored ORT wasm + sentencepiece are content-stable; cache them hard.
+/vendor/*
+  Cache-Control: public, max-age=31536000, immutable

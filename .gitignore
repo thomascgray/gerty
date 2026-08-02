@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# TTS (spec 32) runtime assets — fetched by `npm run fetch-tts-model`, not committed
+public/models/
+public/vendor/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

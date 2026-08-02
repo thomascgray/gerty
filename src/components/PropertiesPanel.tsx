@@ -2,7 +2,7 @@ import { useState } from 'react'
 import {
   IconClock, IconArrowsMove, IconVector, IconLogin, IconLogout, IconDiamond,
   IconVolume, IconPalette, IconTypography, IconArrowUpRight, IconFocusCentered, IconChevronDown,
-  IconFilters, IconMusic,
+  IconFilters, IconMusic, IconWaveSine,
 } from '@tabler/icons-react'
 import { EFFECT_ICON } from './effectIcons'
 import type {
@@ -43,10 +43,13 @@ type PropertiesPanelProps = {
   // Download the media object to disk — 'original' source blob, or a 'processed' re-encode
   // (trimmed clip / extracted audio). Routes through App, which owns the project + toasts.
   onDownload?: (objectId: string, mode: 'original' | 'processed') => void
+  // Re-open the TTS modal to re-generate a narration clip's audio (spec 32). Only shown for audio
+  // clips carrying `data.tts`.
+  onEditNarration?: (objectId: string) => void
   assets?: AssetMeta[]
 }
 
-export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, globalTime, onSeek, isDrawing, onToggleDraw, onDuplicate, onDownload, assets }: PropertiesPanelProps) {
+export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, globalTime, onSeek, isDrawing, onToggleDraw, onDuplicate, onDownload, onEditNarration, assets }: PropertiesPanelProps) {
   // A selected zoom or effect takes over the panel (all three selections are mutually exclusive).
   if (zoom) {
     return <ZoomEditor zoom={zoom} dispatch={dispatch} globalTime={globalTime} onSeek={onSeek} />
@@ -438,6 +441,22 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
           )}
         </Accordion>
       )}
+
+      {/* Narration (TTS clips only, spec 32): edit the script/voice and re-generate the audio. */}
+      {obj.type === 'audio' && (obj.data as AudioData).tts && onEditNarration && (() => {
+        const tts = (obj.data as AudioData).tts!
+        return (
+          <Accordion title="Narration">
+            <p className="text-[11px] text-subtle leading-relaxed line-clamp-3 mb-2 italic">"{tts.text}"</p>
+            <button
+              onClick={() => onEditNarration(obj.id)}
+              className="flex items-center justify-center gap-1.5 w-full py-2 text-sm font-medium bg-accent text-accent-contrast rounded-lg hover:bg-accent-hover cursor-pointer transition-colors"
+            >
+              <IconWaveSine size={15} stroke={2} /> Edit narration
+            </button>
+          </Accordion>
+        )
+      })()}
 
       {/* Volume (audio/video) */}
       {(obj.type === 'audio' || obj.type === 'video') && (() => {

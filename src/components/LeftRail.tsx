@@ -4,7 +4,7 @@ import { getAssetUrl } from '../lib/assetStore'
 import { EFFECT_PRESETS } from '../lib/effectPresets'
 import {
   IconPhoto, IconTypography, IconShape, IconZoomScan,
-  IconArrowUpRight, IconScribble, IconPhotoPlus, IconMusic, IconSquare, IconCircle,
+  IconArrowUpRight, IconScribble, IconPhotoPlus, IconMusic, IconSquare, IconCircle, IconWaveSine,
   IconChevronLeft, IconChevronRight, IconFilters,
   IconContrast, IconMovie, IconDeviceTv, IconBrush,
   IconPrism, IconSkull, IconSunset2, IconBinoculars, IconVideo, IconMoon,
@@ -19,6 +19,7 @@ type LeftRailProps = {
   assets: AssetMeta[]
   onAddMedia: () => void                    // open the import flow (modal)
   onAddAsset: (assetId: string) => void     // re-add an already-imported asset
+  onCreateTTS: () => void                   // spec 32: open the text-to-speech modal
   onCreateObject: (type: TimelineObjectType) => void
   onCreateZoom: () => void
   onCreateEffect: (kind: VideoEffectKind) => void  // spec 23: colour/overlay effects
@@ -50,7 +51,7 @@ const SECTIONS: { id: RailSection; label: string; Icon: TablerIcon }[] = [
  * Subsumes the old header creation clusters and the "+ Asset" trigger, and adds a basic re-addable
  * media library. Collapsible to just the icon rail. Ephemeral view-state (not persisted).
  */
-export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateObject, onCreateZoom, onCreateEffect, onApplyPreset }: LeftRailProps) {
+export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateTTS, onCreateObject, onCreateZoom, onCreateEffect, onApplyPreset }: LeftRailProps) {
   const [section, setSection] = useState<RailSection>('media')
   const [open, setOpen] = useState(true)
 
@@ -105,7 +106,7 @@ export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateObjec
         <div className="w-52 h-full flex flex-col min-h-0 shrink-0">
           {section === 'media' && (
             <div className="flex-1 min-h-0 overflow-y-auto">
-              <MediaSection assets={assets} onAddMedia={onAddMedia} onAddAsset={onAddAsset} />
+              <MediaSection assets={assets} onAddMedia={onAddMedia} onAddAsset={onAddAsset} onCreateTTS={onCreateTTS} />
             </div>
           )}
           {section === 'text' && (
@@ -173,10 +174,11 @@ export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateObjec
   )
 }
 
-function MediaSection({ assets, onAddMedia, onAddAsset }: {
+function MediaSection({ assets, onAddMedia, onAddAsset, onCreateTTS }: {
   assets: AssetMeta[]
   onAddMedia: () => void
   onAddAsset: (assetId: string) => void
+  onCreateTTS: () => void
 }) {
   return (
     <div className="p-3 flex flex-col gap-3">
@@ -185,6 +187,14 @@ function MediaSection({ assets, onAddMedia, onAddAsset }: {
         className="flex items-center justify-center gap-1.5 w-full py-2 text-sm font-medium bg-accent text-accent-contrast rounded-lg hover:bg-accent-hover cursor-pointer transition-colors"
       >
         <IconPhotoPlus size={16} stroke={2} /> Add media
+      </button>
+
+      <button
+        onClick={onCreateTTS}
+        title="Generate narration from text (in-browser text to speech)"
+        className="flex items-center justify-center gap-1.5 w-full py-2 text-sm font-medium bg-surface-muted text-fg border border-border rounded-lg hover:bg-surface-hover cursor-pointer transition-colors"
+      >
+        <IconWaveSine size={16} stroke={2} /> Text to speech
       </button>
 
       {assets.length === 0 ? (
