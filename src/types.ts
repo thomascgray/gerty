@@ -174,6 +174,15 @@ export type FreehandData = {
   strokes: { x: number; y: number }[][]  // array of strokes, each stroke is points 0–1 relative to bbox
 }
 
+// Parameters that generated a text-to-speech narration clip (spec 32). Stored on the AudioData so a
+// TTS clip is re-editable and the choice survives save/.gerty export. Present ONLY on clips created
+// via Text to Speech; absent ⇒ an ordinary imported audio clip.
+export type TtsSource = {
+  text: string    // the narration script — the source of truth for re-generation
+  voice: string   // engine voice id, e.g. 'af_heart'
+  speed: number   // 0.5–2, baked into synthesis
+}
+
 export type AudioData = {
   assetId: string           // reference to asset in asset store
   volume: number            // 0–1
@@ -184,6 +193,7 @@ export type AudioData = {
   sourceOut?: number        // trim: source seconds where playback ends; default originalDuration
   sourceMin?: number        // recoverable-source window floor: sourceIn can't trim below this; default 0. A split narrows it so the halves read as untrimmed clips (no ghosts).
   sourceMax?: number        // recoverable-source window ceil: sourceOut can't trim past this; default originalDuration
+  tts?: TtsSource           // spec 32: present ⇒ a text-to-speech narration clip (enables re-generate)
 }
 
 export type VideoData = {

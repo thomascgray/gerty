@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import type { InteractionMode, TimelineObjectType, TimelineObject, ArrowData, FreehandData, VideoEffectKind, PhotoData } from '../types'
+import type { InteractionMode, TimelineObjectType, TimelineObject, ArrowData, FreehandData, VideoEffectKind, PhotoData, AudioData } from '../types'
 import { createTimelineObject, createCameraZoom, createVideoEffect, createMarker } from '../types'
 import { getRememberedStyle, getRememberedData } from '../lib/objectDefaults'
 import { EFFECT_PRESETS, buildPresetEffects } from '../lib/effectPresets'
@@ -7,7 +7,7 @@ import { useProject } from '../hooks/useProject'
 import { usePlayback } from '../hooks/usePlayback'
 import { useAudioPlayback } from '../hooks/useAudioPlayback'
 import { useUiPrefs } from '../hooks/useUiPrefs'
-import { loadAssetsFromDB, clearAllAssets, getAssetBlob, generateWaveform, isSupportedMediaFile } from '../lib/assetStore'
+import { loadAssetsFromDB, clearAllAssets, getAssetBlob, generateWaveform, isSupportedMediaFile, storeAsset } from '../lib/assetStore'
 import { exportProjectBrep, importProjectBrep } from '../lib/projectStorage'
 import { downloadOriginal, downloadProcessed } from '../lib/objectDownload'
 import { pushToast, dismissToast } from '../hooks/useToasts'
@@ -20,6 +20,9 @@ import TransportBar from './TransportBar'
 import Timeline from './Timeline'
 import PropertiesPanel from './PropertiesPanel'
 import ImportModal from './ImportModal'
+import TtsModal from './TtsModal'
+import type { TtsParams } from './TtsModal'
+import type { TtsResult } from '../lib/tts'
 import ExportModal from './ExportModal'
 import AppearanceControls from './AppearanceControls'
 import HotkeysModal from './HotkeysModal'
@@ -38,6 +41,13 @@ const SPLITTER_HEIGHT = 6 // the resize handle (h-1.5); part of the animated tim
 
 const maxTimelineHeight = () =>
   Math.max(MIN_TIMELINE_HEIGHT, window.innerHeight - HEADER_HEIGHT - MIN_RENDER_HEIGHT)
+
+// Derive a short clip name from a narration script (spec 32): first few words, truncated.
+function ttsClipName(text: string): string {
+  const words = text.trim().split(/\s+/).slice(0, 5).join(' ')
+  if (!words) return 'Narration'
+  return words.length > 32 ? words.slice(0, 32).trimEnd() + '…' : words
+}
 const clampTimelineHeight = (h: number) =>
   Math.max(MIN_TIMELINE_HEIGHT, Math.min(maxTimelineHeight(), h))
 const defaultTimelineHeight = () => clampTimelineHeight(Math.round(window.innerHeight * 0.26))
@@ -81,6 +91,9 @@ export default function App() {
   // real transform (WYSIWYG, matches export). Pure view state — not persisted, not part of undo.
   const [cameraView, setCameraView] = useState<'frame' | 'live'>('frame')
   const [showImport, setShowImport] = useState(false)
+  // Text-to-speech modal (spec 32). `create` builds a new narration clip; `edit` re-generates the
+  // audio of the clip `editId`, pre-filled from its stored `tts` params.
+  const [ttsModal, setTtsModal] = useState<{ mode: 'create' | 'edit'; editId?: string; initial?: TtsParams } | null>(null)
   const [showExport, setShowExport] = useState(false)
   const [showHotkeys, setShowHotkeys] = useState(false)
   const [showChangelog, setShowChangelog] = useState(false)
@@ -305,6 +318,57 @@ export default function App() {
     }
     addObjects([obj])
   }, [project.assets, playback.globalTime, addObjects])
+
+  // === Text to speech (spec 32) ===
+  // Open the TTS modal to author a new narration clip (from the Media rail).
+  const handleCreateTTS = useCallback(() => setTtsModal({ mode: 'create' }), [])
+
+  // Open the TTS modal pre-filled to re-generate an existing narration clip's audio (from the panel).
+  const handleEditNarration = useCallback((objectId: string) => {
+    const obj = project.objects.find((o) => o.id === objectId)
+    const data = obj?.data as AudioData | undefined
+    if (!obj || obj.type !== 'audio' || !data?.tts) return
+    setTtsModal({ mode: 'edit', editId: objectId, initial: { text: data.tts.text, voice: data.tts.voice, speed: data.tts.speed } })
+  }, [project.objects])
+
+  // Commit a synthesized clip: register the WAV as an audio asset, then create (or, in edit mode,
+  // replace-in-place) the audio object. The synthesized blob is reused as-is — no re-synthesis here.
+  const handleTTSConfirm = useCallback(async (result: TtsResult, params: TtsParams) => {
+    const modal = ttsModal
+    if (!modal) return
+    setTtsModal(null)
+    const dur = result.duration
+    const name = ttsClipName(params.text)
+    const { meta, blob } = await storeAsset(new File([result.blob], `${name}.wav`, { type: 'audio/wav' }))
+    meta.duration = dur // storeAsset doesn't set duration for audio; we know it exactly from samples
+    let waveform: number[] | undefined
+    try { waveform = await generateWaveform(blob) } catch { /* no waveform — timeline bar just omits it */ }
+    dispatch({ type: 'ADD_ASSETS', assets: [meta] })
+
+    if (modal.mode === 'edit' && modal.editId) {
+      const prev = project.objects.find((o) => o.id === modal.editId)?.data as AudioData | undefined
+      // Whole `data` is replaced (UPDATE_OBJECT shallow-merges), so carry volume/mute forward and
+      // reset the trim window to the fresh audio (no stale sourceIn/Out/Min/Max).
+      const data: AudioData = {
+        assetId: meta.id,
+        volume: prev?.volume ?? 1,
+        muted: prev?.muted,
+        originalDuration: dur,
+        waveform,
+        sourceIn: 0,
+        sourceOut: dur,
+        tts: params,
+      }
+      dispatch({ type: 'UPDATE_OBJECT', objectId: modal.editId, updates: { duration: dur, name, data } })
+    } else {
+      const obj = createTimelineObject(
+        'audio',
+        { assetId: meta.id, volume: 1, originalDuration: dur, waveform, sourceIn: 0, sourceOut: dur, tts: params },
+        { startTime: playback.globalTime, duration: dur, name },
+      )
+      addObjects([obj])
+    }
+  }, [ttsModal, project.objects, dispatch, playback.globalTime, addObjects])
 
   const handleCreateObject = useCallback((type: TimelineObjectType) => {
     const defaultData: Record<TimelineObjectType, () => ReturnType<typeof createTimelineObject>['data']> = {
@@ -743,6 +807,7 @@ export default function App() {
           assets={project.assets}
           onAddMedia={() => setShowImport(true)}
           onAddAsset={handleAddExistingAsset}
+          onCreateTTS={handleCreateTTS}
           onCreateObject={handleCreateObject}
           onCreateZoom={handleCreateZoom}
           onCreateEffect={handleCreateEffect}
@@ -803,6 +868,7 @@ export default function App() {
           onToggleDraw={handleToggleDrawSelected}
           onDuplicate={handleDuplicateObject}
           onDownload={handleDownloadObject}
+          onEditNarration={handleEditNarration}
           assets={project.assets}
         />
       </div>
@@ -867,6 +933,14 @@ export default function App() {
           insertAtTime={playback.globalTime}
           onAssetsAdded={(assets) => dispatch({ type: 'ADD_ASSETS', assets })}
           initialFiles={dropFiles}
+        />
+      )}
+      {ttsModal && (
+        <TtsModal
+          mode={ttsModal.mode}
+          initial={ttsModal.initial}
+          onClose={() => setTtsModal(null)}
+          onConfirm={handleTTSConfirm}
         />
       )}
       {showExport && <ExportModal project={project} onClose={() => setShowExport(false)} />}
