@@ -19,14 +19,16 @@ import * as ort from 'onnxruntime-web'
 const ctx = self as unknown as Worker
 
 // Model weights: local same-origin in dev (fast/offline, via `npm run fetch-tts-model`), fetched from
-// HuggingFace at runtime in production. Cloudflare Pages rejects files >25MiB (ours reach ~73MiB), so
-// the weights can't ship with the app; HF sends CORS headers so the cross-origin fetch is allowed
-// under our COEP. Override with VITE_TTS_MODEL_BASE to point at your own HF mirror / R2 bucket.
+// our Cloudflare R2 bucket at runtime in production. Cloudflare Pages rejects files >25MiB (ours reach
+// ~73MiB), so the weights can't ship with the app; R2 has zero egress fees and its CORS policy allows
+// the cross-origin fetch under our COEP. The prod default is hardcoded (Cloudflare Pages did not
+// expose VITE_TTS_MODEL_BASE to the Vite build) but VITE_TTS_MODEL_BASE still overrides it if set.
+// NOTE: the R2 bucket stores the weight files at its ROOT, so no /pocket-tts/... path suffix here.
 const MODEL_BASE =
   import.meta.env.VITE_TTS_MODEL_BASE ??
   (import.meta.env.DEV
     ? '/models/pocket-tts/english_2026-04'
-    : 'https://huggingface.co/spaces/KevinAHM/pocket-tts-web/resolve/main/onnx/english_2026-04')
+    : 'https://gerty-models.tomg.cool')
 
 // ORT wasm + the sentencepiece tokenizer are small enough to ship with the app (public/vendor/,
 // served same-origin). Populated by `npm run fetch-tts-model` (dev) / the build step (prod).

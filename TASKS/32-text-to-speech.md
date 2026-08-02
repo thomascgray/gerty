@@ -336,6 +336,16 @@ _int8.onnx), custom domain, CORS policy (GET/HEAD + AllowedOrigins) for our COEP
 inline at BUILD time → must be in the Pages build env + redeploy). HF Space remains the default
 fallback when the var is unset. Awaiting user to perform the R2 setup.
 
+[2026-08-03] Deploy #1 (tts #16, master c2bddce) shipped but was pulling weights from HUGGINGFACE, not
+R2 — DevTools showed onnx requests to huggingface.co, and the deployed worker chunk was byte-identical
+to the HF-baked build. Root cause: Cloudflare Pages did NOT expose the `VITE_TTS_MODEL_BASE` dashboard
+var to the Vite build (import.meta.env.DEV baked fine → hit the else branch → HF default; the var came
+through undefined). Fix: hardcoded the PROD default in `tts.worker.ts` to the R2 root
+`https://gerty-models.tomg.cool` (files are at the bucket ROOT — no path suffix), env var kept as an
+optional override. Proven locally: fresh `npm run build` → new worker chunk bakes only the R2 URL, HF
+string gone. Needs commit → PR → master → redeploy, then re-verify the baked URL + DevTools Network.
+The CF `VITE_TTS_MODEL_BASE` var is now inert (can be removed).
+
 ## Open follow-up: model hosting
 
 Currently the model files load from huggingface.co (cached in browser Cache Storage after first load →
