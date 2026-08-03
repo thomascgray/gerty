@@ -21,6 +21,16 @@ export type ChangelogEntry = {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: 'v1.2',
+    date: 'Aug 2026',
+    items: [
+      'Text to speech - type a script, pick a voice, and generate voice-over narration straight onto the timeline.',
+      'Choose from eight voices, preview the result before committing, and regenerate any narration clip later to tweak the script or voice.',
+      'Speech is synthesized entirely on your device - your script and the audio never leave your machine (the voice model downloads once, then it’s cached).',
+      'Much smaller exports: video is now encoded against your source’s own bitrate, so re-exported screen recordings come out a fraction of the size at the same quality.',
+    ],
+  },
+  {
     version: 'v1.1',
     items: [
       'Drop files anywhere in the window to import them - not just through the import dialog.',
