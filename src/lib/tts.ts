@@ -3,18 +3,19 @@
 // (onnxruntime-web + sentencepiece) lives entirely in the worker chunk, so importing this stays cheap.
 
 // Curated voice roster. pocket-tts's English bundle ships 8 built-in voices (Les Misérables character
-// names). Labelled by name under a single group — no gender guessing (refine after previewing in-app).
+// names under the hood). We surface neutral "Masculine N" / "Feminine N" labels - hiding the character
+// names avoids biasing the user's choice. `id` stays the underlying pocket-tts voice name.
 export type TtsVoice = { id: string; label: string; group: string }
 
 export const TTS_VOICES: TtsVoice[] = [
-  { id: 'alba',    label: 'Alba',    group: 'English' },
-  { id: 'azelma',  label: 'Azelma',  group: 'English' },
-  { id: 'cosette', label: 'Cosette', group: 'English' },
-  { id: 'eponine', label: 'Eponine', group: 'English' },
-  { id: 'fantine', label: 'Fantine', group: 'English' },
-  { id: 'javert',  label: 'Javert',  group: 'English' },
-  { id: 'jean',    label: 'Jean',    group: 'English' },
-  { id: 'marius',  label: 'Marius',  group: 'English' },
+  { id: 'alba',    label: 'Masculine 1', group: 'English' }, // Alba
+  { id: 'javert',  label: 'Masculine 2', group: 'English' }, // Javert
+  { id: 'jean',    label: 'Masculine 3', group: 'English' }, // Jean
+  { id: 'marius',  label: 'Masculine 4', group: 'English' }, // Marius
+  { id: 'azelma',  label: 'Feminine 1',  group: 'English' }, // Azelma
+  { id: 'cosette', label: 'Feminine 2',  group: 'English' }, // Cosette
+  { id: 'eponine', label: 'Feminine 3',  group: 'English' }, // Eponine
+  { id: 'fantine', label: 'Feminine 4',  group: 'English' }, // Fantine
 ]
 
 export const DEFAULT_TTS_VOICE = 'alba'
