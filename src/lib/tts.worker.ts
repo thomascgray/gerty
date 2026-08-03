@@ -12,7 +12,14 @@
 // Curated voices come from voices.bin (precomputed states); the mimi_encoder (voice cloning) is NOT
 // loaded. Non-determinism (Math.random sampling noise) is fine: TTS bakes to a WAV asset once.
 
-import * as ort from 'onnxruntime-web'
+// ort is loaded via a DYNAMIC import (see ensureLoaded), NOT a static one — load-bearing for
+// multi-threading. ort spawns Emscripten pthread workers by re-loading the module chunk it lives in;
+// if ort were statically bundled INTO this worker, those pthreads would re-run our top-level
+// `onmessage` and clobber the pthread runtime's own handler, deadlocking InferenceSession.create
+// (exactly what hung the production build). A dynamic import makes Vite/Rollup code-split ort into its
+// OWN chunk, so pthreads load ort-only code and thread cleanly. `Ort` is a type-only import (erased).
+import type * as Ort from 'onnxruntime-web'
+let ort!: typeof import('onnxruntime-web')
 
 // In a dedicated module worker `self` IS the worker global. Cast to Worker to borrow postMessage's
 // (msg, transfer[]) + onmessage typing without pulling in the WebWorker lib (which clashes with DOM).
@@ -74,8 +81,8 @@ type BundleMeta = {
 
 type Raw = { data: Float32Array | BigInt64Array | Uint8Array; shape: number[]; dtype: string }
 type VoiceRecord = Record<string, Raw>
-type TensorMap = Record<string, ort.Tensor>
-type RunResult = Record<string, ort.Tensor>
+type TensorMap = Record<string, Ort.Tensor>
+type RunResult = Record<string, Ort.Tensor>
 
 // The sentencepiece module is loaded at runtime (see loadTokenizer). Only the bits we use are typed.
 type SpProcessor = {
@@ -91,16 +98,16 @@ let tokenizer: SpProcessor
 let voiceRecords: Record<string, VoiceRecord> = {}
 const voiceStateCache = new Map<string, TensorMap>()
 
-let textConditioner: ort.InferenceSession
-let flowLmMain: ort.InferenceSession
-let flowLmFlow: ort.InferenceSession
-let mimiDecoder: ort.InferenceSession
+let textConditioner: Ort.InferenceSession
+let flowLmMain: Ort.InferenceSession
+let flowLmFlow: Ort.InferenceSession
+let mimiDecoder: Ort.InferenceSession
 
 let sampleRate = 24000
 let latentDim = 32
 let conditioningDim = 1024
 let maxTokenPerChunk = 50
-let stTensors: { s: ort.Tensor; t: ort.Tensor }[] = []
+let stTensors: { s: Ort.Tensor; t: Ort.Tensor }[] = []
 
 // ---------------------------------------------------------------------------
 // tensor / state helpers (ported from inference-worker.js)
@@ -116,7 +123,7 @@ function makeFilledArray(shape: number[], dtype: Dtype, fill?: string): Float32A
   return data
 }
 
-function createTensor(dtype: Dtype, data: Float32Array | BigInt64Array | Uint8Array, dims: number[]): ort.Tensor {
+function createTensor(dtype: Dtype, data: Float32Array | BigInt64Array | Uint8Array, dims: number[]): Ort.Tensor {
   return new ort.Tensor(dtype as never, data as never, dims)
 }
 
@@ -391,16 +398,18 @@ async function fetchModelFile(name: string, index: number, total: number, id: nu
 function ensureLoaded(id: number): Promise<void> {
   if (!loaded) {
     loaded = (async () => {
+      // Dynamic import → ort lands in its own chunk (see the import note up top), which is what makes
+      // multi-threading safe here.
+      ort = await import('onnxruntime-web')
       ort.env.wasm.wasmPaths = ORT_WASM_BASE
       ort.env.wasm.simd = true
-      // Single-threaded ON PURPOSE. With numThreads > 1, ort spawns Emscripten pthread workers by
-      // re-loading THIS bundled worker chunk; our top-level `ctx.onmessage` then clobbers the handler
-      // the pthread runtime installs, so the pthreads never report ready and the main thread deadlocks
-      // inside InferenceSession.create. It only bites the PRODUCTION bundle (in dev, ort is a separate
-      // optimized-dep module, so its pthread workers load ort's own glue, not our chunk — which is why
-      // it worked locally but hung on Cloudflare). SIMD single-threaded is reliable everywhere and
-      // pocket-tts int8 is light enough to stay usable. (Revisit for speed via a dedicated ort worker.)
-      ort.env.wasm.numThreads = 1
+      // Multi-threaded when the page is cross-origin isolated (our COOP/COEP headers provide the
+      // SharedArrayBuffer that ort's threaded wasm needs); ~1.5x realtime vs single-thread. Falls back
+      // to 1 thread when isolation is unavailable. Safe now that ort is its own chunk (pthreads no
+      // longer re-enter this worker — see the import note).
+      ort.env.wasm.numThreads = (self as unknown as { crossOriginIsolated?: boolean }).crossOriginIsolated
+        ? Math.min(navigator.hardwareConcurrency || 4, 8)
+        : 1
 
       const metaBuf = await fetchModelFile('bundle.json', 0, 6, id)
       meta = JSON.parse(new TextDecoder().decode(metaBuf)) as BundleMeta
@@ -410,7 +419,7 @@ function ensureLoaded(id: number): Promise<void> {
       maxTokenPerChunk = Number(meta.max_token_per_chunk || 50)
       precomputeFlowBuffers()
 
-      const opts: ort.InferenceSession.SessionOptions = { executionProviders: ['wasm'], graphOptimizationLevel: 'all' }
+      const opts: Ort.InferenceSession.SessionOptions = { executionProviders: ['wasm'], graphOptimizationLevel: 'all' }
       // The four ONNX graphs (mimi_encoder skipped — curated voices only).
       const [textCondBuf, flowMainBuf, flowFlowBuf, decoderBuf] = await Promise.all([
         fetchModelFile('text_conditioner_int8.onnx', 1, 6, id),

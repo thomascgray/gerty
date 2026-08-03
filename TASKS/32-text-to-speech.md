@@ -1,6 +1,6 @@
 # 32 — Text to Speech (narration)
 
-**Status**: In Progress
+**Status**: Shipped (live in production; follow-up backlog tracked at the bottom of this file)
 
 ## Overview
 
@@ -166,7 +166,8 @@ Pocket-tts pivot (2026-08-02 — kokoro abandoned as engine):
 [X] Decide curated-voice story: voices.bin precomputed states, skip `mimi_encoder`. 8-voice roster.
 [X] Port into app: `tts.worker.ts` rewritten as the pocket-tts ONNX pipeline (TS); PCM → WAV on the
     worker. Dropped kokoro-js + all WebGPU/device code. tsc + eslint green.
-[ ] User browser test of the ported in-app feature (generate → preview → add → play → export).
+[X] User browser test of the ported in-app feature — PASSED locally AND in production (gerty.tomg.cool,
+    weights from R2). Final prod blocker was the ort threading deadlock, fixed via numThreads=1.
 
 ## Work Log
 
@@ -363,11 +364,75 @@ verified: numThreads=1 + R2 URL both baked. Needs commit → PR → deploy → r
   strong browser-cache headers (Cf-Cache-Status DYNAMIC). Expected for now; fix later by setting
   Cache-Control: immutable on the R2 objects (or a CF cache rule). Not blocking.
 
-## Open follow-up: model hosting
+[2026-08-03] ✅ LIVE IN PRODUCTION AND WORKING. Deployed on Cloudflare Pages (gerty.tomg.cool),
+weights served from our own Cloudflare R2 (gerty-models.tomg.cool, verified in DevTools Network),
+single-threaded ort, end-to-end generate → preview → add-to-timeline confirmed by the user. Core
+spec 32 is done. Remaining items are the backlog below (not blockers).
 
-Currently the model files load from huggingface.co (cached in browser Cache Storage after first load →
-one-time per origin). ort wasm is already served locally (Vite bundles it). **Decision: keep HF CDN for now** (2026-08-02). One-time cached download per origin; revisit
-self-hosting if this graduates from experiment to production. If we self-host later: mirror model
-files into `public/models/Kokoro-82M-v1.0-ONNX/` (~86MB q8) + point the worker at a local base path
-(`env.localModelPath`/`allowLocalModels`), gitignored + populated by a fetch script. No user-facing
-code churn to switch.
+[2026-08-03] Restored multi-threading (undid the numThreads=1 workaround) by fixing the ROOT cause of
+the pthread deadlock: static `import * as ort from 'onnxruntime-web'` bundled ort into the tts.worker
+chunk, so ort's Emscripten pthread workers re-loaded THAT chunk (with our `onmessage`) and clobbered
+the pthread runtime's handler. Fix = load ort via a DYNAMIC `await import('onnxruntime-web')`, which
+makes Rollup code-split ort into its own chunk. Build proves the split: tts.worker chunk dropped
+474KB → 9.4KB with ZERO ort internals; ort now lives in `ort.bundle.min-*.js` (463KB). pthreads
+re-load the ort-only chunk → no clobber → threads init. `numThreads` back to
+`crossOriginIsolated ? min(hardwareConcurrency,8) : 1`. Kept a type-only `import type * as Ort` for the
+`Ort.Tensor`/`Ort.InferenceSession` annotations; runtime `ort` is the dynamically-loaded module. tsc +
+eslint + build green; R2 URL still baked. NEEDS prod verification: after deploy, generate on
+gerty.tomg.cool and confirm (a) it still works (no 67% hang) and (b) it's faster than the single-thread
+build (check DevTools has the ort pthread workers loading `ort.bundle.min-*.js`, NOT tts.worker). If it
+regresses/hangs, revert this commit to fall back to the reliable numThreads=1.
+
+## Follow-up improvements (backlog for later specs)
+
+Ordered roughly by value. None blocks the shipped feature.
+
+### Performance
+- **Cache weights across page refreshes.** Right now every reload re-fetches ~156MB (R2 objects have no
+  strong browser-cache headers → Cf-Cache-Status DYNAMIC; in-memory ort sessions only live for the page
+  session). Fix: set `Cache-Control: public, max-age=31536000, immutable` on the R2 objects (object
+  metadata or a Cloudflare cache rule). For true persistence even across cache eviction, have the worker
+  stash the fetched model blobs in Cache Storage / IndexedDB and read them back first.
+- ~~Restore multi-threading for faster synthesis.~~ DONE 2026-08-03 (pending prod verification) —
+  changed `import * as ort` to a DYNAMIC `await import('onnxruntime-web')` so Vite code-splits ort into
+  its own chunk (`ort.bundle.min-*.js`, 463KB) instead of bundling it into the tts.worker chunk (now
+  9.4KB). ort's pthread workers now re-load the ort-only chunk, not ours, so nothing clobbers the
+  pthread handler. `numThreads` restored to `crossOriginIsolated ? min(cores,8) : 1`. Verified in the
+  build (worker chunk has zero ort internals). See the 2026-08-03 threading log below.
+
+### Resilience / hosting
+- **Remove the build-time dependency on KevinAHM's HF Space.** `setup-tts-vendor.mjs` fetches
+  `sentencepiece.js` from that Space at every build, and `fetch-tts-model.mjs` pulls the weights from
+  it for local dev. If that Space disappears, builds + fresh dev setup break. Fix: commit
+  `sentencepiece.js` (4MB, it's app code) and mirror the weights to our own R2 (point fetch-tts-model
+  at R2). Then we depend on nothing external.
+- **CORS allowlist is `gerty.tomg.cool` only** → TTS is CORS-blocked on `videoeditor-c2h.pages.dev`
+  and on preview deploys. Add those origins to the R2 CORS policy if TTS should work there.
+- **Model versioning / cache-busting.** Weights sit at the R2 bucket ROOT (no version prefix, because
+  we stripped the path when the files were uploaded to root). A future model update couldn't cache-bust
+  cleanly. Re-upload under a versioned prefix (e.g. `english_2026-04/`) and set MODEL_BASE to match.
+
+### UX
+- **Refine voice labels.** Currently bare character names (Alba, Azelma, Cosette, Eponine, Fantine,
+  Javert, Jean, Marius) under one "English" group. Now that they're audible, group by gender/accent and
+  give friendlier labels. (Roster in `src/lib/tts.ts` `TTS_VOICES`.)
+- **Download progress jumps** (4 parallel fetches map to 17/33/50/67%). Make it monotonic/byte-based.
+- **Cancellable generation** — no way to abort a long synth mid-flight today.
+
+### Features
+- **More languages.** pocket-tts also has German / Italian / Portuguese / Spanish bundles (same shape);
+  add a language selector (each is another ~156MB download).
+- **Custom voice cloning.** We skip `mimi_encoder` (curated voices only). Wire the encoder + an audio
+  upload to enable cloning from a reference clip.
+- **Speed control.** Removed (pocket-tts has no native speed knob). Could add pitch-preserving
+  time-stretch, or expose via the clip's timeline rate.
+
+### Cleanup
+- **Verify TTS narration in an EXPORTED mp4 on prod.** It's an ordinary audio clip so it should just
+  work (and did in local reasoning), but it hasn't been explicitly re-verified after the R2 deploy.
+- **Stray unused ort wasm in `dist/assets`** (~11MB) — Vite emits a hashed copy from ort's import graph
+  even though `wasmPaths` overrides it to `/vendor/ort/`. Harmless (<25MiB) but wasteful; suppress if
+  worth it.
+- **`VITE_TTS_MODEL_BASE` is inert on Cloudflare** (Pages doesn't expose it to the Vite build; R2 URL is
+  hardcoded as the prod default). Remove the env var from the Pages dashboard or document that it's a
+  no-op there.
