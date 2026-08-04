@@ -257,6 +257,48 @@ function applyAction(project: Project, action: ProjectAction): Project {
     case 'REMOVE_EFFECT':
       return { ...project, effects: (project.effects ?? []).filter((e) => e.id !== action.effectId) }
 
+    case 'SET_CAPTIONS':
+      return { ...project, captions: action.captions }
+
+    case 'UPDATE_CAPTIONS':
+      if (!project.captions) return project
+      return { ...project, captions: { ...project.captions, ...action.updates } }
+
+    case 'UPDATE_CAPTION_CUE':
+      if (!project.captions) return project
+      return {
+        ...project,
+        captions: {
+          ...project.captions,
+          cues: project.captions.cues.map((c) =>
+            c.id === action.cueId ? { ...c, ...action.updates } : c,
+          ),
+        },
+      }
+
+    case 'ADD_CAPTION_CUE': {
+      if (!project.captions) return project
+      const cues = [...project.captions.cues, action.cue].sort((a, b) => a.startTime - b.startTime)
+      return { ...project, captions: { ...project.captions, cues } }
+    }
+
+    case 'REMOVE_CAPTION_CUE':
+      if (!project.captions) return project
+      return {
+        ...project,
+        captions: {
+          ...project.captions,
+          cues: project.captions.cues.filter((c) => c.id !== action.cueId),
+        },
+      }
+
+    case 'REMOVE_CAPTIONS': {
+      if (!project.captions) return project
+      const next = { ...project }
+      delete next.captions
+      return next
+    }
+
     case 'ADD_MARKER':
       return { ...project, markers: [...(project.markers ?? []), action.marker] }
 
@@ -299,9 +341,10 @@ function applyAction(project: Project, action: ProjectAction): Project {
         startTime: action.startTime ?? original.startTime + original.duration,
         lane: topLane + 1,
         // Deep-clone nested structures so the copy is fully independent (R10) — a shallow
-        // spread would share keyframe/data arrays by reference between original and copy.
+        // spread would share keyframe/data/loopEffects arrays by reference between original and copy.
         data: structuredClone(original.data),
         keyframes: original.keyframes ? structuredClone(original.keyframes) : undefined,
+        loopEffects: original.loopEffects ? structuredClone(original.loopEffects) : undefined,
       }
       const objects = [...project.objects]
       objects.splice(idx + 1, 0, dupe)

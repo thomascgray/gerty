@@ -1,19 +1,19 @@
-import type { VideoEffect, VideoEffectKind } from '../types'
-import { createVideoEffect } from '../types'
+import type { VideoEffect, VideoEffectKind, EffectLayer } from '../types'
+import { createVideoEffect, createEffectLayer } from '../types'
 
 /**
- * Effect presets (spec 26) — named, developer-authored *stacks* of effects that drop with one click.
+ * Effect presets (spec 26 / 37) — named, developer-authored *stacks* of effects that drop with one click.
  *
- * A preset is pure data: a list of `{ kind, options }` specs. Applying it builds N ordinary
- * `VideoEffect`s at the playhead (via `createVideoEffect`) and adds them in one undo entry
- * (`ADD_EFFECTS`). They're just a starting point — every effect a preset creates is fully editable
- * and deletable afterward, exactly like a hand-added one. Composes the existing spec-23/24/25 effect
- * kinds; adds no new render paths.
+ * A preset is pure data: a list of `{ kind, options }` layer specs. Applying it builds ONE Full screen
+ * effect container at the playhead whose layer stack is those specs (spec 37 — was N separate effects
+ * pre-37), added in one undo entry (`ADD_EFFECT`). It's just a starting point — the container and its
+ * layers are fully editable and deletable afterward, exactly like a hand-added one. Composes the
+ * existing spec-23/24/25 effect kinds; adds no new render paths.
  */
 
 type EffectSpec = {
   kind: VideoEffectKind
-  options?: Partial<Omit<VideoEffect, 'id' | 'kind'>>
+  options?: Partial<Omit<EffectLayer, 'id' | 'kind'>>
 }
 
 export type EffectPreset = {
@@ -24,7 +24,7 @@ export type EffectPreset = {
 }
 
 // A longer default hold than a single effect (which defaults to 2s) so a dropped preset visibly
-// covers a clip. Applied to every spec unless it sets its own hold.
+// covers a clip. Applied to the container's shared envelope (spec 37).
 const HOLD = 5
 
 export const EFFECT_PRESETS: EffectPreset[] = [
@@ -119,9 +119,9 @@ export const EFFECT_PRESETS: EffectPreset[] = [
   },
 ]
 
-/** Build the concrete VideoEffects for a preset, all starting at `startTime` (the playhead). */
-export function buildPresetEffects(preset: EffectPreset, startTime: number): VideoEffect[] {
-  return preset.effects.map(({ kind, options }) =>
-    createVideoEffect(kind, { hold: HOLD, ...options, startTime }),
-  )
+/** Build ONE Full screen effect container for a preset (spec 37): its layer stack is the preset's
+ * specs, sharing an envelope that starts at `startTime` (the playhead) and holds for HOLD seconds. */
+export function buildPresetEffect(preset: EffectPreset, startTime: number): VideoEffect {
+  const layers: EffectLayer[] = preset.effects.map(({ kind, options }) => createEffectLayer(kind, options))
+  return createVideoEffect({ startTime, hold: HOLD, layers })
 }

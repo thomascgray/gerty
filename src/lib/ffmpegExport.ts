@@ -1,9 +1,10 @@
-import type { Project, PhotoData, AudioData, VideoData } from '../types'
+import type { Project, PhotoData, AudioData, VideoData, TimelineObject } from '../types'
 import { createAnimatedExportSources } from './animatedImage'
 import { renderFrame, loadImage } from './renderer'
 import { resolveCamera } from './camera'
 import { resolveEffects } from './effects'
 import { clipRate, sourceTimeAt, srcIn, sourceSpan, effectiveVolume } from './mediaTiming'
+import { resolvedGainAt, ANALYSIS_WINDOW } from './loudness'
 import { getAssetUrl, getAssetBlob } from './assetStore'
 import { createVideoFrameSource, type VideoFrameSource } from './videoDecoder'
 import type { ExportWorkerRequest, ExportWorkerResponse, RenderedAudio, EncodeConfig } from './exportWorkerTypes'
@@ -26,6 +27,26 @@ function hasWorkerExportSupport(): boolean {
 
 function abortError(): DOMException {
   return new DOMException('Export cancelled', 'AbortError')
+}
+
+/**
+ * Set a mixdown clip's GainNode for export (spec 38). Off: a constant `effectiveVolume` (bit-identical
+ * to pre-spec-38). Auto-level on: schedules the time-varying gain envelope along the OUTPUT timeline
+ * via linear ramps, mapping each output offset back to source time. resolvedGainAt already folds the
+ * clip volume + mute, so this fully replaces the old `gain.gain.value = effectiveVolume(data)`.
+ */
+function scheduleClipGain(gain: GainNode, data: AudioData | VideoData, obj: TimelineObject) {
+  if (!data.autoLevel || !data.loudness || data.loudness.length === 0) {
+    gain.gain.value = effectiveVolume(data)
+    return
+  }
+  const startAt = obj.startTime
+  gain.gain.setValueAtTime(resolvedGainAt(data, sourceTimeAt(data, 0)), startAt)
+  for (let out = ANALYSIS_WINDOW; out < obj.duration; out += ANALYSIS_WINDOW) {
+    const src = sourceTimeAt(data, out / obj.duration)
+    gain.gain.linearRampToValueAtTime(resolvedGainAt(data, src), startAt + out)
+  }
+  gain.gain.linearRampToValueAtTime(resolvedGainAt(data, sourceTimeAt(data, 1)), startAt + obj.duration)
 }
 
 /**
@@ -176,7 +197,7 @@ async function prerenderAudioMix(project: Project): Promise<RenderedAudio | null
       source.buffer = decoded
       source.playbackRate.value = clipRate(data, obj.duration)
       const gain = offlineCtx.createGain()
-      gain.gain.value = effectiveVolume(data)
+      scheduleClipGain(gain, data, obj)
       source.connect(gain)
       gain.connect(offlineCtx.destination)
       // Trim: start at sourceIn, play only the source span (spec 14 R6).
@@ -377,6 +398,7 @@ async function exportWithWebCodecs(
       renderFrame(ctx, objects, globalTime, { width, height }, imageCache, {
         camera: resolveCamera(project.zooms, globalTime),
         effects: resolveEffects(project.effects, globalTime),
+        captions: project.captions ?? null,
       })
 
       // Encode canvas as video frame (no real-time delay!)
@@ -445,7 +467,7 @@ async function exportWithWebCodecs(
         source.playbackRate.value = clipRate(data, obj.duration)
 
         const gain = offlineCtx.createGain()
-        gain.gain.value = effectiveVolume(data)
+        scheduleClipGain(gain, data, obj)
 
         source.connect(gain)
         gain.connect(offlineCtx.destination)
@@ -723,7 +745,7 @@ async function exportWithMediaRecorder(
         source.playbackRate.value = clipRate(data, obj.duration)
 
         const gain = offlineCtx.createGain()
-        gain.gain.value = effectiveVolume(data)
+        scheduleClipGain(gain, data, obj)
 
         source.connect(gain)
         gain.connect(offlineCtx.destination)
@@ -798,6 +820,7 @@ async function exportWithMediaRecorder(
     renderFrame(ctx, objects, globalTime, { width, height }, imageCache, {
       camera: resolveCamera(project.zooms, globalTime),
       effects: resolveEffects(project.effects, globalTime),
+      captions: project.captions ?? null,
     })
 
     // @ts-expect-error - requestFrame exists on CanvasCaptureMediaStreamTrack

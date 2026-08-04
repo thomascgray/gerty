@@ -1,5 +1,6 @@
 import type { AssetMeta, AssetType } from '../types'
 import { probeAnimatedImage, sniffImageMime, type AnimatedImageInfo } from './animatedImage'
+import { analyzeLoudness } from './loudness'
 
 const DB_NAME = 'gerty-assets'
 const DB_VERSION = 1
@@ -193,14 +194,8 @@ export function getMediaDuration(blob: Blob): Promise<number> {
   })
 }
 
-/** Generate waveform peak data from an audio blob. Returns ~200 peak values (0–1). */
-export async function generateWaveform(blob: Blob, numPeaks = 200): Promise<number[]> {
-  const arrayBuffer = await blob.arrayBuffer()
-  const audioCtx = new AudioContext()
-  const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer)
-  const channelData = audioBuffer.getChannelData(0)
-  await audioCtx.close()
-
+/** Peak-reduce a decoded channel to ~numPeaks values (0–1) for the timeline waveform. */
+function peaksFromChannel(channelData: Float32Array, numPeaks: number): number[] {
   const samplesPerPeak = Math.floor(channelData.length / numPeaks)
   const peaks: number[] = []
 
@@ -216,6 +211,56 @@ export async function generateWaveform(blob: Blob, numPeaks = 200): Promise<numb
   }
 
   return peaks
+}
+
+/** Generate waveform peak data from an audio blob. Returns ~200 peak values (0–1). */
+export async function generateWaveform(blob: Blob, numPeaks = 200): Promise<number[]> {
+  const arrayBuffer = await blob.arrayBuffer()
+  const audioCtx = new AudioContext()
+  const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer)
+  const channelData = audioBuffer.getChannelData(0)
+  await audioCtx.close()
+  return peaksFromChannel(channelData, numPeaks)
+}
+
+/**
+ * Decode an audio blob ONCE, returning both its exact duration and a ~numPeaks waveform.
+ *
+ * For microphone recordings (spec 34): MediaRecorder WebM blobs write no container duration, so an
+ * <audio> element reports `duration === Infinity` — decoding is the only reliable source of length.
+ * `AudioBuffer.duration` is exact, and we're already decoding for the waveform, so one pass gives both.
+ */
+export async function decodeAudio(
+  blob: Blob,
+  numPeaks = 200,
+): Promise<{ duration: number; peaks: number[] }> {
+  const arrayBuffer = await blob.arrayBuffer()
+  const audioCtx = new AudioContext()
+  const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer)
+  const channelData = audioBuffer.getChannelData(0)
+  const duration = audioBuffer.duration
+  await audioCtx.close()
+  return { duration, peaks: peaksFromChannel(channelData, numPeaks) }
+}
+
+/**
+ * Decode an asset's audio and compute its per-window RMS loudness (spec 38 auto-level). Run once,
+ * lazily, when a clip's Auto level is first enabled; the result is cached on the clip's data.
+ * Returns null when the asset blob is missing or the media has no decodable audio.
+ */
+export async function analyzeAssetLoudness(assetId: string): Promise<number[] | null> {
+  const blob = getAssetBlob(assetId)
+  if (!blob) return null
+  const arrayBuffer = await blob.arrayBuffer()
+  const audioCtx = new AudioContext()
+  try {
+    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer)
+    return analyzeLoudness(audioBuffer.getChannelData(0), audioBuffer.sampleRate)
+  } catch {
+    return null
+  } finally {
+    await audioCtx.close()
+  }
 }
 
 /** Total size of all cached blobs in bytes. */

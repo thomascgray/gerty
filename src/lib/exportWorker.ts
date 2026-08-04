@@ -186,6 +186,7 @@ async function runExport(
     renderFrame(ctx, objects, globalTime, { width, height }, imageCache, {
       camera: resolveCamera(project.zooms, globalTime),
       effects: resolveEffects(project.effects, globalTime),
+      captions: project.captions ?? null,
     })
 
     // Encode canvas as video frame

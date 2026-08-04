@@ -74,6 +74,35 @@ npm run preview  # serve the production build locally
 
 A single pure `renderFrame` compositor drives both the live preview and export, so what you see is what you get. For a full architecture tour, see [`CLAUDE.md`](CLAUDE.md).
 
+---
+
+## Known limitations & long-term to-dos
+
+A candid running list of rough edges and deferred work. None of it blocks day-to-day use - these are the known trade-offs, kept here so they don't get lost.
+
+**Performance**
+
+- **Export runs on the main thread**, so the UI freezes for the duration of an export and it can't be cancelled. Moving it to a worker is the single biggest open item (spec 09).
+- During playback the whole UI re-renders every frame (`globalTime` is React state). Fine for most projects, but it can get janky on video-heavy ones. The canvas already renders on its own rAF loop; throttling the Timeline / Properties panels is the remaining step.
+- **No devicePixelRatio handling** - the canvas backing store is the raw project size and CSS scales it, so the preview can look a little soft on HiDPI displays.
+
+**Audio**
+
+- Preview preserves pitch when a clip's speed changes, but **export does not** yet (pitch shifts with the rate). See spec 11.
+- General audio polish - fades, finer volume control - is still open (spec 15).
+
+**Auto-captions & text-to-speech (in-browser ML)**
+
+- **Watch Cloudflare R2 Class B (read) operations.** The Whisper caption model and the pocket-tts voices are self-hosted in R2 (`gerty-models.tomg.cool`). Egress is free, but every model-file fetch is a Class B op, so a wave of first-time caption/TTS users drives that number up. Weights are browser-cached after first load, so repeat use is cheap.
+- Both the caption and TTS workers run **single-threaded** (`numThreads = 1`) for first-run reliability; revisit multi-threading for speed once it's proven stable across browsers.
+- Caption accuracy rides on `distil-small.en`. Swapping `MODEL_ID` in `captions.worker.ts` for a larger Whisper is a one-line change if transcripts are too rough (bigger download, better accuracy).
+- Caption cues are edited from the Properties panel; dragging cue bars directly on the timeline is deferred.
+
+**Editor UX**
+
+- Resize handles for objects dragged **outside the canvas bounds** aren't drawn - this needs a canvas→HTML overlay refactor (spec 05).
+- Objects can only be edited in the camera's **Frame view**, not while zoomed in Live view; adding zoomed editing would require inverting the camera transform for hit-testing (spec 13).
+
 ## License
 
 Licensed under the [GNU General Public License v3.0](LICENSE). You are free to use, study, share and modify this software; if you distribute a modified version, it must also be free software under the same license.

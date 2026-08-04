@@ -7,10 +7,11 @@
 //
 // Idempotent: existing files with the right size are skipped.
 
-import { mkdir, stat, writeFile } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { mkdir } from 'node:fs/promises'
+import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { setupVendor } from './setup-tts-vendor.mjs'
+import { download } from './hf-mirror.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -33,30 +34,11 @@ const WEIGHT_FILES = [
 
 const WEIGHTS_DIR = join(root, 'public', 'models', 'pocket-tts', BUNDLE)
 
-async function sizeOf(path) {
-  try { return (await stat(path)).size } catch { return -1 }
-}
-
-async function download(url, dest) {
-  const existing = await sizeOf(dest)
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`GET ${url} -> ${res.status} ${res.statusText}`)
-  const expected = Number(res.headers.get('content-length') || 0)
-  if (existing > 0 && expected > 0 && existing === expected) {
-    console.log(`  = ${dest.replace(root, '.')} (${existing.toLocaleString()} bytes, skipped)`)
-    res.body?.cancel?.()
-    return
-  }
-  const buf = Buffer.from(await res.arrayBuffer())
-  await writeFile(dest, buf)
-  console.log(`  ↓ ${dest.replace(root, '.')} (${buf.length.toLocaleString()} bytes)`)
-}
-
 async function main() {
   await mkdir(WEIGHTS_DIR, { recursive: true })
   console.log('Model weights (local dev only):')
   for (const f of WEIGHT_FILES) {
-    await download(`${HF_BASE}/onnx/${BUNDLE}/${f}`, join(WEIGHTS_DIR, f))
+    await download(`${HF_BASE}/onnx/${BUNDLE}/${f}`, join(WEIGHTS_DIR, f), root)
   }
   await setupVendor()
   console.log('\nDone. TTS assets are in place (gitignored).')

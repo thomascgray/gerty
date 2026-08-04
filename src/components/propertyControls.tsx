@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   TimelineObject, EasingKind, Transition, TransitionKind, SlideDirection, Keyframe,
-  CameraZoom, CameraKeyframe, TextEffect, TextEffectKind,
+  CameraZoom, CameraKeyframe, TextEffect, TextEffectKind, LoopEffect, LoopEffectKind,
 } from '../types'
 import { keyframeColor, defaultTransitionEasing } from '../lib/keyframes'
 import { clamp01, ease } from '../lib/easing'
@@ -416,47 +416,28 @@ function SliderRow({
  * a kind dropdown ("None" removes the effect) plus the params that apply to the chosen kind.
  * `value`/`onChange` carry the whole `TextEffect` (or undefined); the parent wires undo/persist.
  */
-export function EffectFields({
-  value, onChange,
-}: {
-  value?: TextEffect
-  onChange: (e?: TextEffect) => void
+// Per-kind param rows for one text effect. Same rows the single-effect picker used, extracted so the
+// stack editor can render them per layer (spec 37).
+function TextEffectParams({ value, patch }: {
+  value: TextEffect
+  patch: (p: Partial<Record<string, unknown>>) => void
 }) {
-  const kind = value?.kind ?? 'none'
-  // Merge a partial into the current effect (same kind guaranteed by the UI branch).
-  const patch = (p: Partial<Record<string, unknown>>) => {
-    if (value) onChange({ ...value, ...p } as TextEffect)
-  }
   return (
     <>
-      <Field label="Effect">
-        <select
-          value={kind}
-          onChange={(e) => {
-            const k = e.target.value
-            onChange(k === 'none' ? undefined : DEFAULT_TEXT_EFFECT[k as TextEffectKind])
-          }}
-          className={SELECT_CLS}
-        >
-          <option value="none">None</option>
-          {TEXT_EFFECT_KINDS.map((k) => <option key={k} value={k}>{TEXT_EFFECT_LABELS[k]}</option>)}
-        </select>
-      </Field>
-
-      {value?.kind === 'glow' && (
+      {value.kind === 'glow' && (
         <>
           <ColorRow label="Colour" value={value.color} onChange={(color) => patch({ color })} />
           <SliderRow label="Blur" value={value.blur} min={2} max={40} step={1} onChange={(blur) => patch({ blur })} />
         </>
       )}
-      {value?.kind === 'outline' && (
+      {value.kind === 'outline' && (
         <>
           <ColorRow label="Colour" value={value.color} onChange={(color) => patch({ color })} />
           <SliderRow label="Width" value={value.width} min={0.5} max={12} step={0.5} onChange={(width) => patch({ width })}
             fmt={(v) => v.toFixed(1)} />
         </>
       )}
-      {value?.kind === 'shadow' && (
+      {value.kind === 'shadow' && (
         <>
           <ColorRow label="Colour" value={value.color} onChange={(color) => patch({ color })} />
           <SliderRow label="Offset X" value={value.dx} min={-30} max={30} step={1} onChange={(dx) => patch({ dx })} />
@@ -464,7 +445,7 @@ export function EffectFields({
           <SliderRow label="Blur" value={value.blur} min={0} max={30} step={1} onChange={(blur) => patch({ blur })} />
         </>
       )}
-      {value?.kind === 'gradient' && (
+      {value.kind === 'gradient' && (
         <>
           <ColorRow label="From" value={value.from} onChange={(from) => patch({ from })} />
           <ColorRow label="To" value={value.to} onChange={(to) => patch({ to })} />
@@ -472,7 +453,7 @@ export function EffectFields({
             fmt={(v) => `${v}°`} />
         </>
       )}
-      {value?.kind === 'pulse' && (
+      {value.kind === 'pulse' && (
         <>
           <SliderRow label="Speed" value={value.speed} min={0.1} max={4} step={0.1} onChange={(speed) => patch({ speed })}
             fmt={(v) => v.toFixed(1)} />
@@ -480,25 +461,25 @@ export function EffectFields({
             fmt={(v) => v.toFixed(1)} />
         </>
       )}
-      {value?.kind === 'rainbow' && (
+      {value.kind === 'rainbow' && (
         <SliderRow label="Speed" value={value.speed} min={0.1} max={4} step={0.1} onChange={(speed) => patch({ speed })}
           fmt={(v) => v.toFixed(1)} />
       )}
-      {value?.kind === 'wave' && (
+      {value.kind === 'wave' && (
         <>
           <SliderRow label="Speed" value={value.speed} min={0.1} max={4} step={0.1} onChange={(speed) => patch({ speed })}
             fmt={(v) => v.toFixed(1)} />
           <SliderRow label="Amplitude" value={value.amplitude} min={1} max={40} step={1} onChange={(amplitude) => patch({ amplitude })} />
         </>
       )}
-      {value?.kind === 'shimmer' && (
+      {value.kind === 'shimmer' && (
         <>
           <ColorRow label="Highlight" value={value.color} onChange={(color) => patch({ color })} />
           <SliderRow label="Speed" value={value.speed} min={0.1} max={4} step={0.1} onChange={(speed) => patch({ speed })}
             fmt={(v) => v.toFixed(1)} />
         </>
       )}
-      {value?.kind === 'warble' && (
+      {value.kind === 'warble' && (
         <>
           <SliderRow label="Speed" value={value.speed} min={0.1} max={4} step={0.1} onChange={(speed) => patch({ speed })}
             fmt={(v) => v.toFixed(1)} />
@@ -506,13 +487,172 @@ export function EffectFields({
             fmt={(v) => v.toFixed(1)} />
         </>
       )}
-      {value?.kind === 'glitch' && (
+      {value.kind === 'glitch' && (
         <>
           <SliderRow label="Speed" value={value.speed} min={0.1} max={4} step={0.1} onChange={(speed) => patch({ speed })}
             fmt={(v) => v.toFixed(1)} />
           <SliderRow label="Amount" value={value.amount} min={0.1} max={2} step={0.1} onChange={(amount) => patch({ amount })}
             fmt={(v) => v.toFixed(1)} />
         </>
+      )}
+    </>
+  )
+}
+
+/**
+ * Text-effect STACK editor (spec 37; supersedes the single-effect picker). A list of glyph effects,
+ * each with reorder / remove and its per-kind params, plus an "add effect" picker. Effects combine by
+ * grouped last-wins (see drawText). `value`/`onChange` carry the whole array; the parent wires
+ * undo/persist via UPDATE_OBJECT (`data.effects`). Only the first layer is keyframable (OQ2), handled
+ * in the renderer via the `text.effect` channel — not surfaced here in v1.
+ */
+export function EffectFieldsStack({ value, onChange }: {
+  value: TextEffect[]
+  onChange: (v: TextEffect[]) => void
+}) {
+  const patchAt = (i: number, p: Partial<Record<string, unknown>>) =>
+    onChange(value.map((v, j) => (j === i ? ({ ...v, ...p } as TextEffect) : v)))
+  const removeAt = (i: number) => onChange(value.filter((_, j) => j !== i))
+  const moveAt = (i: number, dir: -1 | 1) => {
+    const j = i + dir
+    if (j < 0 || j >= value.length) return
+    const next = [...value]
+    ;[next[i], next[j]] = [next[j], next[i]]
+    onChange(next)
+  }
+  const add = (k: TextEffectKind) => onChange([...value, DEFAULT_TEXT_EFFECT[k]])
+
+  const btn = 'px-1 text-subtle hover:text-fg disabled:opacity-30 disabled:cursor-default cursor-pointer text-xs leading-none'
+  return (
+    <>
+      {value.map((eff, i) => (
+        <div key={i} className="rounded-lg border border-border bg-surface-muted/40 overflow-hidden">
+          <div className="flex items-center gap-1 px-2 py-1 border-b border-border bg-surface-muted/60">
+            <span className="flex-1 text-[11px] font-semibold text-fg truncate">
+              {TEXT_EFFECT_LABELS[eff.kind]}
+            </span>
+            <button className={btn} disabled={i === 0} onClick={() => moveAt(i, -1)} title="Move up">▲</button>
+            <button className={btn} disabled={i === value.length - 1} onClick={() => moveAt(i, 1)} title="Move down">▼</button>
+            <button className={`${btn} hover:text-danger`} onClick={() => removeAt(i)} title="Remove">✕</button>
+          </div>
+          <div className="space-y-2 px-2.5 py-2">
+            <TextEffectParams value={eff} patch={(p) => patchAt(i, p)} />
+          </div>
+        </div>
+      ))}
+      <Field label="Add">
+        <select
+          value=""
+          onChange={(e) => { if (e.target.value) add(e.target.value as TextEffectKind) }}
+          className={SELECT_CLS}
+        >
+          <option value="">Add effect…</option>
+          {TEXT_EFFECT_KINDS.map((k) => <option key={k} value={k}>{TEXT_EFFECT_LABELS[k]}</option>)}
+        </select>
+      </Field>
+      {value.length === 0 && (
+        <p className="text-[10px] text-subtle">No effect yet - add one above (outline, glow, wave...).</p>
+      )}
+    </>
+  )
+}
+
+// --- Loop effects (spec 36) -----------------------------------------------------------------
+// Per-object continuous "loop" animation, available on any visual object (not audio). Mirrors the
+// text-effect picker: a kind dropdown ("None" removes it) + raw speed/amount sliders per kind.
+export const LOOP_EFFECT_KINDS: LoopEffectKind[] = [
+  'zoom', 'spin', 'sway', 'bob', 'warble', 'pulse', 'shake', 'rainbow',
+]
+export const LOOP_EFFECT_LABELS: Record<LoopEffectKind, string> = {
+  zoom: 'Zoom (pulse in/out)',
+  spin: 'Spin',
+  sway: 'Sway',
+  bob: 'Bob (float)',
+  warble: 'Warble (3D)',
+  pulse: 'Pulse (scale + fade)',
+  shake: 'Shake',
+  rainbow: 'Rainbow (hue cycle)',
+}
+// Sensible starting params per kind — picking a kind seeds these; each param stays editable.
+export const DEFAULT_LOOP_EFFECT: Record<LoopEffectKind, LoopEffect> = {
+  zoom: { kind: 'zoom', speed: 0.5, amount: 0.5 },
+  spin: { kind: 'spin', speed: 0.25 },
+  sway: { kind: 'sway', speed: 0.5, amount: 0.5 },
+  bob: { kind: 'bob', speed: 0.5, amount: 0.5 },
+  warble: { kind: 'warble', speed: 0.5, amount: 0.5 },
+  pulse: { kind: 'pulse', speed: 1, amount: 0.6 },
+  shake: { kind: 'shake', speed: 1, amount: 0.4 },
+  rainbow: { kind: 'rainbow', speed: 1 },
+}
+
+// Per-kind sliders for one loop effect. Every kind exposes speed; all but spin/rainbow add amount.
+function LoopEffectParams({ value, patch }: {
+  value: LoopEffect
+  patch: (p: Partial<Record<string, unknown>>) => void
+}) {
+  const hasAmount = value.kind !== 'spin' && value.kind !== 'rainbow'
+  return (
+    <>
+      <SliderRow label="Speed" value={value.speed} min={0.1} max={4} step={0.1}
+        onChange={(speed) => patch({ speed })} fmt={(v) => v.toFixed(1)} />
+      {hasAmount && (
+        <SliderRow label="Amount" value={(value as { amount: number }).amount} min={0.1} max={1.5} step={0.1}
+          onChange={(amount) => patch({ amount })} fmt={(v) => v.toFixed(1)} />
+      )}
+    </>
+  )
+}
+
+/**
+ * Loop-effect STACK editor for a visual object (spec 37; supersedes the single-effect `LoopFields`).
+ * A list of motions, each with reorder / remove and its per-kind sliders, plus an "add motion" picker.
+ * Motions compose in list order (e.g. shake + bob). `value`/`onChange` carry the whole array; the
+ * parent wires undo/persist via UPDATE_OBJECT (`loopEffects`).
+ */
+export function LoopFieldsStack({ value, onChange }: {
+  value: LoopEffect[]
+  onChange: (v: LoopEffect[]) => void
+}) {
+  const patchAt = (i: number, p: Partial<Record<string, unknown>>) =>
+    onChange(value.map((v, j) => (j === i ? ({ ...v, ...p } as LoopEffect) : v)))
+  const removeAt = (i: number) => onChange(value.filter((_, j) => j !== i))
+  const moveAt = (i: number, dir: -1 | 1) => {
+    const j = i + dir
+    if (j < 0 || j >= value.length) return
+    const next = [...value]
+    ;[next[i], next[j]] = [next[j], next[i]]
+    onChange(next)
+  }
+  const add = (k: LoopEffectKind) => onChange([...value, DEFAULT_LOOP_EFFECT[k]])
+
+  const btn = 'px-1 text-subtle hover:text-fg disabled:opacity-30 disabled:cursor-default cursor-pointer text-xs leading-none'
+  return (
+    <>
+      {value.map((eff, i) => (
+        <div key={i} className="rounded-lg border border-border bg-surface-muted/40 overflow-hidden">
+          <div className="flex items-center gap-1 px-2 py-1 border-b border-border bg-surface-muted/60">
+            <span className="flex-1 text-[11px] font-semibold text-fg truncate">{LOOP_EFFECT_LABELS[eff.kind]}</span>
+            <button className={btn} disabled={i === 0} onClick={() => moveAt(i, -1)} title="Move up">▲</button>
+            <button className={btn} disabled={i === value.length - 1} onClick={() => moveAt(i, 1)} title="Move down">▼</button>
+            <button className={`${btn} hover:text-danger`} onClick={() => removeAt(i)} title="Remove">✕</button>
+          </div>
+          <div className="space-y-2 px-2.5 py-2">
+            <LoopEffectParams value={eff} patch={(p) => patchAt(i, p)} />
+          </div>
+        </div>
+      ))}
+      <Field label="Add">
+        <select
+          value=""
+          onChange={(e) => { if (e.target.value) add(e.target.value as LoopEffectKind) }}
+          className={SELECT_CLS}
+        >
+          <option value="">Add motion…</option>
+          {LOOP_EFFECT_KINDS.map((k) => <option key={k} value={k}>{LOOP_EFFECT_LABELS[k]}</option>)}
+        </select>
+      </Field>
+      {value.length === 0 && (
+        <p className="text-[10px] text-subtle">No motion yet - add one above to make this object move.</p>
       )}
     </>
   )

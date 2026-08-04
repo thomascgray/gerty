@@ -21,6 +21,29 @@ export type ChangelogEntry = {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: 'v1.2.2',
+    date: 'Aug 2026',
+    items: [
+      'Stack effects - layer more than one at a time and reorder them, everywhere effects live.',
+      'Objects and text can carry several motions/effects at once (e.g. shake and bob together, or outline + wave + a colour fill on text).',
+      'Full screen effects are now one item on the left rail: add a “Full screen effect”, then stack CRT, halftone, grain and more inside a single timeline bar that fades in and out together.',
+      'Presets now drop as one stacked full-screen effect you can tweak layer by layer, hide individual layers, and reorder.',
+      'Old projects load unchanged - any existing effect just becomes the first layer of its stack.',
+    ],
+  },
+  {
+    version: 'v1.2.1',
+    date: 'Aug 2026',
+    items: [
+      'Auto captions - generate subtitles from your timeline’s speech with one click, in Media → Auto captions.',
+      'It transcribes everything that’s spoken (a video’s own audio, audio clips, and text-to-speech narration all at once) and lays the captions out on their own timeline row.',
+      'Captions play on the canvas as you scrub and are burned into your exported video, styled to match (size, colour, position, and an optional background).',
+      'Fix anything the recognition got wrong: edit a caption’s text, drag its timing with start/end fields, add new captions, or delete them from the properties panel.',
+      'Got music or singing in the mix? Mark any clip “Skip captions” so it’s left out of the transcription and doesn’t confuse the results.',
+      'Runs entirely on your device - the audio never leaves your machine (the speech model downloads once, then it’s cached), with a live progress bar while it works.',
+    ],
+  },
+  {
     version: 'v1.2',
     date: 'Aug 2026',
     items: [

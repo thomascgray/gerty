@@ -1,12 +1,13 @@
 import { useRef, useCallback, useState, useEffect } from 'react'
 import { createPortal } from 'react-dom'
-import type { TimelineObject, ProjectAction, AudioData, VideoData, TextData, PhotoData, CameraZoom, VideoEffect, Marker } from '../types'
+import type { TimelineObject, ProjectAction, AudioData, VideoData, TextData, PhotoData, CameraZoom, VideoEffect, VideoEffectKind, Marker, CaptionTrack } from '../types'
+import { layersOf } from '../types'
 import { keyframeColor, declaredChannels, POSE_CHANNELS, CHANNELS_BY_KEY } from '../lib/keyframes'
 import { zoomEnvelope } from '../lib/camera'
 import { effectEnvelope } from '../lib/effects'
 import { sourceSpan, srcIn, srcOut, srcMin, srcMax } from '../lib/mediaTiming'
 import { snapTime, snapClipMove, SNAP_THRESHOLD_PX } from '../lib/snapping'
-import { IconChevronDown, IconPlus, IconX, IconViewfinder, IconFilters, IconEye, IconEyeOff, IconTrash } from '@tabler/icons-react'
+import { IconChevronDown, IconPlus, IconX, IconViewfinder, IconFilters, IconBadgeCc, IconEye, IconEyeOff, IconTrash } from '@tabler/icons-react'
 
 type TimelineProps = {
   objects: TimelineObject[]
@@ -24,8 +25,14 @@ type TimelineProps = {
   onSelectZoom: (id: string | null) => void
   // Video effects (spec 23) — own pinned track, mirrors the Camera track affordances.
   effects?: VideoEffect[]
-  selectedEffectId: string | null
-  onSelectEffect: (id: string | null) => void
+  // Effect multi-select mirrors objects: the id array is the source of truth; `additive` (shift-click)
+  // toggles an id in/out instead of replacing the selection.
+  selectedEffectIds: string[]
+  onSelectEffect: (id: string | null, additive?: boolean) => void
+  // Auto-captions (spec 35) — own pinned track (only shown when a track exists), one bar per cue.
+  captions?: CaptionTrack
+  selectedCaptionId: string | null
+  onSelectCaptions: (id: string | null) => void
   // Timeline markers (spec 22). Retime/edit/delete are dispatched directly (like zooms).
   markers?: Marker[]
   // Collapse the timeline to a slim bar (spec 16 B3). App owns the collapsed state + height.
@@ -47,6 +54,8 @@ const ZOOM_WHEEL_SENSITIVITY = 0.0012
 const TIMELINE_PADDING_SECONDS = 5
 const ZOOM_COLOR = '#f59e0b' // amber — matches the canvas framing rect + zoom panel
 const EFFECT_COLOR = '#d946ef' // fuchsia — matches the effect panel header; distinct from violet video bars
+const CAPTION_TRACK_HEIGHT = 26 // pinned captions row (spec 35); cues never overlap so one row suffices
+const CAPTION_COLOR = '#0ea5e9' // sky blue — matches the caption panel header
 
 // Zoomed way out, clips shrink to thin vertical slivers; shrink the lane/bar height to match so they
 // read as slim ticks rather than tall hairlines. Full height above the threshold, lerping down to
@@ -64,7 +73,7 @@ const SNAP_LINE_COLOR = '#ffffff' // the bright guide shown while a drag is acti
 const MARKER_SWATCHES = ['#06b6d4', '#ef4444', '#22c55e', '#f59e0b', '#a855f7', '#ec4899']
 
 // Short labels shown on the effect timeline bars (spec 23).
-const EFFECT_BAR_LABEL: Record<VideoEffect['kind'], string> = {
+const EFFECT_BAR_LABEL: Record<VideoEffectKind, string> = {
   grayscale: 'B&W',
   sepia: 'Sepia',
   invert: 'Invert',
@@ -87,6 +96,13 @@ const EFFECT_BAR_LABEL: Record<VideoEffect['kind'], string> = {
   vhs: 'VHS',
   halftone: 'Halftone',
   comic: 'Comic Ink',
+}
+
+// Label a Full screen effect bar from its layer stack (spec 37): "CRT + Halftone", or "Empty".
+function effectBarLabel(effect: VideoEffect): string {
+  const ls = layersOf(effect)
+  if (ls.length === 0) return 'Empty'
+  return ls.map((l) => EFFECT_BAR_LABEL[l.kind]).join(' + ')
 }
 
 /**
@@ -165,7 +181,10 @@ type DragState =
   // Retime a single pan/scale keyframe within a zoom's hold (clamped between neighbors, [0, hold]).
   | { kind: 'zoom-move-keyframe'; zoomId: string; kfIndex: number; startMouseX: number; originalTime: number; minTime: number; maxTime: number }
   // Effect bars on the pinned Effects track (spec 23) — mirror the zoom bar drags.
-  | { kind: 'effect-move'; effectId: string; startMouseX: number; originalStartTime: number }
+  // Move drags one effect OR a whole multi-selection together (effects shift in time only — no lane).
+  // `effectId` is the grabbed (primary) that drives snapping; `group` holds every moving effect's
+  // original start. The shared time delta is floored so the earliest member can't cross 0.
+  | { kind: 'effect-move'; effectId: string; startMouseX: number; originalStartTime: number; group: { effectId: string; originalStartTime: number }[]; minGroupStart: number }
   | { kind: 'effect-resize-right'; effectId: string; startMouseX: number; originalHold: number }
   | { kind: 'effect-resize-left'; effectId: string; startMouseX: number; originalStartTime: number; originalHold: number }
   // Drag a marker flag along the ruler to retime it (spec 22). A no-movement press is treated as a
@@ -189,8 +208,11 @@ export default function Timeline({
   selectedZoomId,
   onSelectZoom,
   effects,
-  selectedEffectId,
+  selectedEffectIds,
   onSelectEffect,
+  captions,
+  selectedCaptionId,
+  onSelectCaptions,
   markers,
   onCollapse,
 }: TimelineProps) {
@@ -207,6 +229,10 @@ export default function Timeline({
   // null = no extra lanes beyond object range
   const [addedTopLane, setAddedTopLane] = useState<number | null>(null)
   const [addedBottomLane, setAddedBottomLane] = useState<number | null>(null)
+  // Effects-track collapse (QoL): when the track stacks 2+ rows it eats vertical space. Collapsing
+  // shows a single summary bar spanning all effects (hover lists them; click to expand + edit). Pure
+  // view state — not persisted, not undo. Mirrors `cameraView`/`addedTopLane`.
+  const [effectsCollapsed, setEffectsCollapsed] = useState(false)
 
   // Compute lane range from objects
   const objMinLane = objects.length > 0
@@ -526,11 +552,18 @@ export default function Timeline({
           })
         }
       } else if (dragState.kind === 'effect-move') {
+        // Snapping is driven by the grabbed (primary) effect; the whole group then shifts by the same
+        // delta, floored so the earliest member can't slide past 0 (relative spacing preserved).
         const raw = Math.max(0, dragState.originalStartTime + dt)
         const snap = snapTime(raw, buildSnapCandidates({}), pixelsPerSecond, SNAP_THRESHOLD_PX, alt)
         setSnapLineTime(snap.snappedTo)
-        const newStart = snap.snappedTo !== null ? snap.time : Math.round(raw * 10) / 10
-        dispatch({ type: 'UPDATE_EFFECT_TRANSIENT', effectId: dragState.effectId, updates: { startTime: newStart } })
+        const primaryStart = snap.snappedTo !== null ? snap.time : Math.round(raw * 10) / 10
+        let dtApplied = primaryStart - dragState.originalStartTime
+        if (dragState.minGroupStart + dtApplied < 0) dtApplied = -dragState.minGroupStart
+        // One transient dispatch per member — they collapse into a single undo entry on commit.
+        for (const g of dragState.group) {
+          dispatch({ type: 'UPDATE_EFFECT_TRANSIENT', effectId: g.effectId, updates: { startTime: Math.round((g.originalStartTime + dtApplied) * 100) / 100 } })
+        }
       } else if (dragState.kind === 'effect-resize-right') {
         const newHold = Math.round(Math.max(0, dragState.originalHold + dt) * 10) / 10
         dispatch({ type: 'UPDATE_EFFECT_TRANSIENT', effectId: dragState.effectId, updates: { hold: newHold } })
@@ -583,10 +616,16 @@ export default function Timeline({
         // just the grabbed clip (pick one out of the group). A real drag keeps the whole selection.
         const moved = Math.abs(e.clientX - dragState.startMouseX) >= 3 || Math.abs(e.clientY - dragState.startMouseY) >= 3
         if (!moved) onSelectObject(dragState.objectId)
+      } else if (dragState.kind === 'effect-move') {
+        dispatch({ type: 'COMMIT_TRANSIENT' })
+        // A press with no real movement is a click, not a drag: collapse a multi-selection down to
+        // just the grabbed effect. A real drag keeps the whole selection.
+        const moved = Math.abs(e.clientX - dragState.startMouseX) >= 3
+        if (!moved) onSelectEffect(dragState.effectId)
       } else if (
         dragState.kind === 'trim-left' || dragState.kind === 'trim-right' ||
         dragState.kind === 'zoom-move' || dragState.kind === 'zoom-resize-right' || dragState.kind === 'zoom-resize-left' ||
-        dragState.kind === 'effect-move' || dragState.kind === 'effect-resize-right' || dragState.kind === 'effect-resize-left'
+        dragState.kind === 'effect-resize-right' || dragState.kind === 'effect-resize-left'
       ) {
         dispatch({ type: 'COMMIT_TRANSIENT' })
       }
@@ -601,7 +640,7 @@ export default function Timeline({
       window.removeEventListener('mousemove', handleMouseMove)
       window.removeEventListener('mouseup', handleMouseUp)
     }
-  }, [dragState, pixelsPerSecond, dispatch, onSeek, onSelectObject, minLane, maxLane, objects, zooms, effects, markers, buildSnapCandidates])
+  }, [dragState, pixelsPerSecond, dispatch, onSeek, onSelectObject, onSelectEffect, minLane, maxLane, objects, zooms, effects, markers, buildSnapCandidates])
 
   // Render ruler ticks
   const ticks: { time: number; label: string; major: boolean }[] = []
@@ -629,7 +668,15 @@ export default function Timeline({
   // effect drag is active we hold the pre-drag layout frozen, then recompute on release.
   const frozenEffectLayoutRef = useRef<{ rows: Map<string, number>; count: number } | null>(null)
   const { rows: effectRowMap, count: effectRowCount } = frozenEffectLayoutRef.current ?? layoutEffectRows(effects ?? [])
-  const effectsTrackHeight = effectRowCount * EFFECT_ROW_HEIGHT
+  const rawEffects = effects ?? []
+  // Collapse is only offered (and only saves space) once effects stack into 2+ rows.
+  const effectsCollapsible = effectRowCount > 1
+  const fxCollapsed = effectsCollapsed && effectsCollapsible
+  const effectsTrackHeight = fxCollapsed ? EFFECT_ROW_HEIGHT : effectRowCount * EFFECT_ROW_HEIGHT
+  // Captions track (spec 35): only present once a track has been generated. Its pinned top sits just
+  // below the Effects track, and the lane content flows below it.
+  const captionsTrackHeight = captions ? CAPTION_TRACK_HEIGHT : 0
+  const captionsTop = RULER_HEIGHT + CAMERA_TRACK_HEIGHT + effectsTrackHeight
 
   // Helper: visual Y position for a lane number
   const laneToY = (lane: number) => {
@@ -670,14 +717,31 @@ export default function Timeline({
               <IconViewfinder size={15} stroke={2} />
             </div>
 
-            {/* Effects track label — pinned (sticky) below the Camera track (spec 23) */}
+            {/* Effects track label — pinned (sticky) below the Camera track (spec 23). When the track
+                stacks 2+ rows it doubles as a collapse toggle (chevron), condensing to a summary bar. */}
             <div
-              className="sticky z-10 w-full flex items-center justify-center border-b border-r border-border bg-surface"
+              className={`sticky z-10 w-full flex items-center justify-center gap-0.5 border-b border-r border-border bg-surface ${effectsCollapsible ? 'cursor-pointer hover:bg-surface-muted' : ''}`}
               style={{ height: effectsTrackHeight, top: RULER_HEIGHT + CAMERA_TRACK_HEIGHT, color: EFFECT_COLOR }}
-              title="Video effects"
+              title={effectsCollapsible ? (fxCollapsed ? 'Expand effects' : 'Collapse effects') : 'Video effects'}
+              onClick={() => { if (effectsCollapsible) setEffectsCollapsed((v) => !v) }}
             >
-              <IconFilters size={15} stroke={2} />
+              <IconFilters size={14} stroke={2} />
+              {effectsCollapsible && (
+                <IconChevronDown size={10} stroke={2.5} style={{ transform: fxCollapsed ? 'rotate(-90deg)' : 'none' }} />
+              )}
             </div>
+
+            {/* Captions track label — pinned (sticky) below the Effects track (spec 35); only when a
+                caption track exists. */}
+            {captions && (
+              <div
+                className="sticky z-10 w-full flex items-center justify-center border-b border-r border-border bg-surface"
+                style={{ height: captionsTrackHeight, top: captionsTop, color: CAPTION_COLOR }}
+                title="Captions"
+              >
+                <IconBadgeCc size={15} stroke={2} />
+              </div>
+            )}
 
             {/* Add lane above CTA (dedicated blank lane row) */}
             <button
@@ -892,12 +956,13 @@ export default function Timeline({
                       return (
                         <div
                           key={`zlead-${i}`}
-                          className="absolute top-1/2 -translate-y-1/2 h-1.5 z-20 pointer-events-none rounded-sm"
+                          className="absolute top-1/2 -translate-y-1/2 z-20 pointer-events-none"
                           style={{
                             left: timeToX(zoom.transitionIn + (k.time - lead)),
                             width: Math.max(timeToX(lead), 1),
-                            background: `linear-gradient(90deg, transparent, ${keyframeColor(i)})`,
-                            opacity: 0.5,
+                            height: 2,
+                            background: `repeating-linear-gradient(90deg, ${keyframeColor(i)} 0 4px, transparent 4px 7px)`,
+                            opacity: 0.9,
                           }}
                         />
                       )
@@ -957,13 +1022,55 @@ export default function Timeline({
                 }
               }}
             >
-              {(effects ?? []).map((effect) => {
+              {fxCollapsed ? (() => {
+                // Collapsed: one summary bar spanning [earliest start, latest end]. Hover lists the
+                // effects (click one to select + expand); clicking the bar body just expands.
+                const sumStart = Math.min(...rawEffects.map((e) => e.startTime))
+                const sumEnd = Math.max(...rawEffects.map((e) => e.startTime + effectEnvelope(e)))
+                const left = timeToX(sumStart)
+                const width = Math.max(timeToX(sumEnd - sumStart), 8)
+                const anySelected = rawEffects.some((e) => selectedEffectIds.includes(e.id))
+                return (
+                  <div className="absolute group" style={{ left, top: 2, width, height: EFFECT_ROW_HEIGHT - 4 }}>
+                    <div
+                      className="absolute inset-0 rounded-sm overflow-hidden cursor-pointer flex items-center"
+                      style={{
+                        backgroundColor: EFFECT_COLOR,
+                        opacity: anySelected ? 1 : 0.72,
+                        outline: anySelected ? '2px solid #fff' : 'none',
+                        outlineOffset: -1,
+                      }}
+                      title="Click to expand and edit"
+                      onMouseDown={(e) => { e.stopPropagation(); setEffectsCollapsed(false) }}
+                    >
+                      <span className="text-[10px] text-white px-1.5 truncate font-semibold" style={{ lineHeight: `${EFFECT_ROW_HEIGHT - 4}px` }}>
+                        {rawEffects.length} effects
+                      </span>
+                    </div>
+                    {/* Hover list — the track paints above the lanes (z-[60]), so this popover sits on
+                        top. Each row selects that effect and expands the track for editing. */}
+                    <div className="absolute left-0 top-full mt-1 z-[90] hidden group-hover:flex flex-col rounded-md border border-border bg-surface shadow-lg py-1 min-w-max">
+                      {rawEffects.map((e) => (
+                        <button
+                          key={e.id}
+                          className="flex items-center gap-2 px-2 py-1 text-[11px] text-fg hover:bg-surface-muted text-left whitespace-nowrap"
+                          onMouseDown={(ev) => { ev.stopPropagation(); onSelectEffect(e.id); setEffectsCollapsed(false) }}
+                        >
+                          <span className="w-2 h-2 rounded-sm shrink-0" style={{ background: EFFECT_COLOR, opacity: e.hidden ? 0.35 : 1 }} />
+                          {effectBarLabel(e)}
+                          {e.hidden && <span className="text-subtle">(hidden)</span>}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )
+              })() : (effects ?? []).map((effect) => {
                 const env = effectEnvelope(effect)
                 const left = timeToX(effect.startTime)
                 const width = Math.max(timeToX(env), 8)
                 const inW = timeToX(effect.transitionIn)
                 const outW = timeToX(effect.transitionOut)
-                const isSelected = effect.id === selectedEffectId
+                const isSelected = selectedEffectIds.includes(effect.id)
                 const row = effectRowMap.get(effect.id) ?? 0
                 return (
                   <div
@@ -995,9 +1102,27 @@ export default function Timeline({
                       }}
                       onMouseDown={(e) => {
                         e.stopPropagation()
-                        onSelectEffect(effect.id)
+                        // Shift-click toggles this effect in the multi-selection — no drag starts, so
+                        // you can gather effects (e.g. to delete them together).
+                        if (e.shiftKey) { onSelectEffect(effect.id, true); return }
+                        // Grabbing an effect already in a multi-selection moves the WHOLE group and
+                        // keeps the selection; grabbing any other collapses to just it.
+                        const inGroup = selectedEffectIds.length > 1 && selectedEffectIds.includes(effect.id)
+                        if (!inGroup) onSelectEffect(effect.id)
+                        const groupIds = inGroup ? selectedEffectIds : [effect.id]
+                        const group = groupIds
+                          .map((id) => (effects ?? []).find((x) => x.id === id))
+                          .filter((x): x is VideoEffect => !!x)
+                          .map((x) => ({ effectId: x.id, originalStartTime: x.startTime }))
                         frozenEffectLayoutRef.current = layoutEffectRows(effects ?? [])
-                        setDragState({ kind: 'effect-move', effectId: effect.id, startMouseX: e.clientX, originalStartTime: effect.startTime })
+                        setDragState({
+                          kind: 'effect-move',
+                          effectId: effect.id,
+                          startMouseX: e.clientX,
+                          originalStartTime: effect.startTime,
+                          group,
+                          minGroupStart: Math.min(...group.map((g) => g.originalStartTime)),
+                        })
                       }}
                     >
                       {effect.transitionIn > 0 && (
@@ -1013,7 +1138,7 @@ export default function Timeline({
                         />
                       )}
                       <span className="relative text-[10px] text-white px-1.5 truncate pointer-events-none font-semibold" style={{ lineHeight: `${EFFECT_ROW_HEIGHT - 4}px` }}>
-                        {EFFECT_BAR_LABEL[effect.kind]}
+                        {effectBarLabel(effect)}
                       </span>
                     </div>
 
@@ -1048,6 +1173,51 @@ export default function Timeline({
               })}
             </div>
 
+            {/* Captions track (pinned top, spec 35): one bar per cue. Only rendered when a caption
+                track exists. Clicking a cue (or the empty band) selects the track + seeks. */}
+            {captions && (
+              <div
+                className="sticky z-[60] border-b border-border"
+                style={{ height: captionsTrackHeight, top: captionsTop, background: 'linear-gradient(rgba(14,165,233,0.08), rgba(14,165,233,0.08)), var(--surface-muted)' }}
+                onMouseDown={(e) => {
+                  if (e.target === e.currentTarget) {
+                    onSelectCaptions(captions.id)
+                    onSeek(clientXToTime(e.clientX))
+                  }
+                }}
+              >
+                {captions.cues.map((cue) => {
+                  const left = timeToX(cue.startTime)
+                  const width = Math.max(timeToX(cue.endTime - cue.startTime), 4)
+                  const isActive = globalTime >= cue.startTime && globalTime < cue.endTime
+                  const isSelected = captions.id === selectedCaptionId
+                  return (
+                    <div
+                      key={cue.id}
+                      className="absolute rounded-sm overflow-hidden cursor-pointer"
+                      style={{
+                        left, top: 2, width, height: CAPTION_TRACK_HEIGHT - 4,
+                        backgroundColor: CAPTION_COLOR,
+                        opacity: captions.hidden ? 0.35 : isActive ? 1 : isSelected ? 0.85 : 0.6,
+                        outline: isSelected ? '2px solid #fff' : 'none',
+                        outlineOffset: -1,
+                      }}
+                      title={cue.text}
+                      onMouseDown={(e) => {
+                        e.stopPropagation()
+                        onSelectCaptions(captions.id)
+                        onSeek(cue.startTime)
+                      }}
+                    >
+                      <span className="relative text-[10px] text-white px-1 truncate leading-[18px] pointer-events-none">
+                        {cue.text}
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+
             {/* Blank lane spacer for "add above" CTA alignment */}
             <div style={{ height: laneHeight }} />
 
@@ -1061,6 +1231,7 @@ export default function Timeline({
                   onSelectObject(null)
                   onSelectZoom(null)
                   onSelectEffect(null)
+                  onSelectCaptions(null)
                   onSeek(clientXToTime(e.clientX))
                 }
               }}
@@ -1321,12 +1492,13 @@ export default function Timeline({
                       return (
                         <div
                           key={`lead-${i}`}
-                          className="absolute top-1/2 -translate-y-1/2 h-2 z-10 pointer-events-none rounded-sm"
+                          className="absolute top-1/2 -translate-y-1/2 z-10 pointer-events-none"
                           style={{
                             left: timeToX(k.time - lead),
                             width: Math.max(timeToX(lead), 1),
-                            background: `linear-gradient(90deg, transparent, ${keyframeColor(i)})`,
-                            opacity: 0.5,
+                            height: 2,
+                            background: `repeating-linear-gradient(90deg, ${keyframeColor(i)} 0 4px, transparent 4px 7px)`,
+                            opacity: 0.9,
                           }}
                         />
                       )

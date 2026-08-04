@@ -1,4 +1,5 @@
-import type { TimelineObject, ArrowData, TextData, FreehandData, PhotoData, VideoData, ObjectStyle, CameraState, ResolvedEffect, VignetteParams, ChromaticParams, LightLeakParams } from '../types'
+import type { TimelineObject, ArrowData, TextData, FreehandData, PhotoData, VideoData, ObjectStyle, CameraState, ResolvedEffect, VignetteParams, ChromaticParams, LightLeakParams, CaptionTrack } from '../types'
+import { loopEffectsOf } from '../types'
 import {
   drawArrow,
   drawText,
@@ -10,6 +11,7 @@ import { resolveRenderPose, textMorphAt } from './keyframes'
 import type { TextMorph } from './keyframes'
 import { isIdentityCamera } from './camera'
 import { effectsToFilterString } from './effects'
+import { applyLoopEffect } from './loopEffects'
 import { applyShaderEffects, isShaderEffect } from './glEffects'
 import { clamp01 } from './easing'
 
@@ -18,6 +20,7 @@ export type EditorOptions = {
   activeDrawingObjectId?: string | null
   camera?: CameraState   // spec 13: applied as a global transform around the object loop
   effects?: ResolvedEffect[]  // spec 23: render-wide colour/overlay post-process applied after the object loop
+  captions?: CaptionTrack | null  // spec 35: subtitles drawn as the final stage, un-transformed + ungraded
 }
 
 const GHOST_ALPHA = 0.25
@@ -158,6 +161,105 @@ export function renderFrame(
         ctx.restore()
       }
     }
+  }
+
+  // Captions (spec 35): the FINAL stage — drawn on top of the fully composited + graded frame, with
+  // NO camera transform and the filter reset, so subtitles are never zoomed by the camera nor
+  // colour-graded by the effects post-process. Because this lives in the shared compositor, preview
+  // (Live view) and export burn in identical captions. Absent/hidden ⇒ skipped ⇒ pixel-identical.
+  const captions = editorOptions?.captions
+  if (captions && !captions.hidden) {
+    ctx.save()
+    ctx.filter = 'none'
+    drawCaption(ctx, captions, globalTime, w, h)
+    ctx.restore()
+  }
+}
+
+/**
+ * Draw the active subtitle cue (spec 35): the cue whose [startTime, endTime) contains globalTime,
+ * centered horizontally, wrapped to ~80% of the frame width, anchored at style.position, with an
+ * optional translucent backing box and an always-on shadow/outline for legibility. Un-transformed
+ * (pixel space) — the caller resets the camera/filter before calling.
+ */
+function drawCaption(
+  ctx: CanvasRenderingContext2D,
+  track: CaptionTrack,
+  globalTime: number,
+  w: number,
+  h: number,
+) {
+  // Active cue (only one shows at a time — standard subtitle model). Inlined (not imported from
+  // captions.ts) to keep renderer.ts free of the asset-store/worker deps captions.ts pulls in.
+  let active: { text: string } | null = null
+  for (const cue of track.cues) {
+    if (globalTime >= cue.startTime && globalTime < cue.endTime) { active = cue; break }
+  }
+  if (!active) return
+  const text = active.text.trim()
+  if (!text) return
+
+  const style = track.style
+  const scaleFactor = Math.sqrt((w * h) / (1920 * 1080))
+  const fontPx = Math.max(1, style.fontSize * scaleFactor)
+  const fontFamily = style.fontFamily || 'sans-serif'
+  ctx.font = `bold ${fontPx}px ${fontFamily}`
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+
+  // Word-wrap to 80% of the frame width.
+  const maxWidth = w * 0.8
+  const words = text.split(/\s+/)
+  const lines: string[] = []
+  let current = ''
+  for (const word of words) {
+    const trial = current ? `${current} ${word}` : word
+    if (ctx.measureText(trial).width > maxWidth && current) {
+      lines.push(current)
+      current = word
+    } else {
+      current = trial
+    }
+  }
+  if (current) lines.push(current)
+
+  const lineHeight = fontPx * 1.25
+  const blockHeight = lines.length * lineHeight
+  const marginX = fontPx * 0.5
+  const marginY = fontPx * 0.3
+
+  // Vertical block center at position*h, clamped so the block stays fully in-frame.
+  const half = blockHeight / 2
+  const centerY = Math.min(h - half - marginY, Math.max(half + marginY, style.position * h))
+  const firstLineCenter = centerY - blockHeight / 2 + lineHeight / 2
+  const centerX = w / 2
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const lineY = firstLineCenter + i * lineHeight
+    const metrics = ctx.measureText(line)
+
+    if (style.background) {
+      const boxW = metrics.width + marginX * 2
+      const boxH = lineHeight
+      const boxX = centerX - boxW / 2
+      const boxY = lineY - boxH / 2
+      ctx.fillStyle = 'rgba(0,0,0,0.6)'
+      const r = Math.min(fontPx * 0.25, boxH / 2)
+      ctx.beginPath()
+      ctx.roundRect(boxX, boxY, boxW, boxH, r)
+      ctx.fill()
+    }
+
+    // Legibility: a dark outline + soft shadow under the fill so text reads over any background.
+    ctx.shadowColor = 'rgba(0,0,0,0.8)'
+    ctx.shadowBlur = fontPx * 0.12
+    ctx.lineWidth = Math.max(1, fontPx * 0.08)
+    ctx.strokeStyle = 'rgba(0,0,0,0.85)'
+    ctx.strokeText(line, centerX, lineY)
+    ctx.shadowBlur = 0
+    ctx.fillStyle = style.color || '#ffffff'
+    ctx.fillText(line, centerX, lineY)
   }
 }
 
@@ -596,6 +698,26 @@ function drawObject(
     ctx.translate(-cx, -cy)
   }
 
+  // Loop effects (spec 36/37): an ambient, always-running STACK of modulations layered ON TOP of the
+  // resolved pose — ctx transforms (+ maybe ctx.filter) that are pure fns of clip-relative `time`.
+  // Applied here (after the base rotation, before the type dispatch, inside this save scope) so they
+  // compose with keyframes, rotation, opacity, and the camera without any of them knowing they exist.
+  // Transforms compose on ctx in list order; opacity multipliers multiply; filter fragments (rainbow)
+  // concatenate into one ctx.filter (a single assignment, so multiple filters don't clobber).
+  let effStyle: ObjectStyle = style
+  const loops = loopEffectsOf(obj)
+  if (loops.length > 0) {
+    let loopAlpha = 1
+    const filters: string[] = []
+    for (const loop of loops) {
+      const r = applyLoopEffect(ctx, loop, time, bx, by, bw, bh)
+      loopAlpha *= r.alpha
+      if (r.filter) filters.push(r.filter)
+    }
+    if (filters.length > 0) ctx.filter = filters.join(' ')
+    if (loopAlpha !== 1) effStyle = { ...style, opacity: style.opacity * loopAlpha }
+  }
+
   switch (obj.type) {
     case 'photo': {
       const data = obj.data as PhotoData
@@ -605,25 +727,25 @@ function drawObject(
       // they fall through to the same lookup as before.
       const img = imageCache.get(obj.id) ?? imageCache.get(data.assetId)
       if (img) {
-        ctx.globalAlpha = style.opacity * progress
+        ctx.globalAlpha = effStyle.opacity * progress
         drawImageCover(ctx, img, bx, by, bw, bh)
       }
       break
     }
     case 'arrow':
-      drawArrow(ctx, obj.data as ArrowData, style, progress, bx, by, bw, bh, scaleFactor)
+      drawArrow(ctx, obj.data as ArrowData, effStyle, progress, bx, by, bw, bh, scaleFactor)
       break
     case 'text':
-      drawText(ctx, obj.data as TextData, style, progress, bx, by, bw, bh, scaleFactor, time, morph)
+      drawText(ctx, obj.data as TextData, effStyle, progress, bx, by, bw, bh, scaleFactor, time, morph)
       break
     case 'rectangle':
-      drawRectangle(ctx, style, progress, bx, by, bw, bh, scaleFactor)
+      drawRectangle(ctx, effStyle, progress, bx, by, bw, bh, scaleFactor)
       break
     case 'circle':
-      drawCircle(ctx, style, progress, bx, by, bw, bh, scaleFactor)
+      drawCircle(ctx, effStyle, progress, bx, by, bw, bh, scaleFactor)
       break
     case 'freehand':
-      drawFreehand(ctx, obj.data as FreehandData, style, progress, bx, by, bw, bh, scaleFactor)
+      drawFreehand(ctx, obj.data as FreehandData, effStyle, progress, bx, by, bw, bh, scaleFactor)
       break
     case 'video': {
       const vdata = obj.data as VideoData
@@ -631,7 +753,7 @@ function drawObject(
       // keys HTMLVideoElements by asset id. Prefer object id, fall back to asset id.
       const videoEl = imageCache.get(obj.id) ?? imageCache.get(vdata.assetId)
       if (videoEl) {
-        ctx.globalAlpha = style.opacity * progress
+        ctx.globalAlpha = effStyle.opacity * progress
         drawImageCover(ctx, videoEl, bx, by, bw, bh)
       }
       break
