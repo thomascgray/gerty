@@ -4,7 +4,8 @@
 
 import type { Project, AudioData, VideoData, CaptionCue, CaptionTrack } from '../types'
 import { getAssetBlob } from './assetStore'
-import { srcIn, sourceSpan, clipRate, effectiveVolume } from './mediaTiming'
+import { effectiveVolume } from './mediaTiming'
+import { scheduleClipSource } from './audioMix'
 
 // Whisper consumes 16 kHz mono. Rendering the mix at exactly that rate means the returned segment
 // timestamps map straight to global timeline seconds (whole-timeline scope).
@@ -61,14 +62,11 @@ async function mixTimelineMono16k(project: Project): Promise<Float32Array | null
     try {
       const arrayBuffer = await blob.arrayBuffer()
       const decoded = await offlineCtx.decodeAudioData(arrayBuffer)
-      const source = offlineCtx.createBufferSource()
-      source.buffer = decoded
-      source.playbackRate.value = clipRate(data, obj.duration)
       const gain = offlineCtx.createGain()
       gain.gain.value = effectiveVolume(data)
-      source.connect(gain)
       gain.connect(offlineCtx.destination)
-      source.start(obj.startTime, srcIn(data), sourceSpan(data))
+      // Pitch-preserving so ASR hears sped-up clips at natural pitch (see audioMix).
+      scheduleClipSource(offlineCtx, decoded, data, obj, gain)
     } catch {
       continue
     }

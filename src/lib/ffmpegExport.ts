@@ -3,7 +3,8 @@ import { createAnimatedExportSources } from './animatedImage'
 import { renderFrame, loadImage } from './renderer'
 import { resolveCamera } from './camera'
 import { resolveEffects } from './effects'
-import { clipRate, sourceTimeAt, srcIn, sourceSpan, effectiveVolume } from './mediaTiming'
+import { sourceTimeAt, effectiveVolume } from './mediaTiming'
+import { scheduleClipSource } from './audioMix'
 import { resolvedGainAt, ANALYSIS_WINDOW } from './loudness'
 import { getAssetUrl, getAssetBlob } from './assetStore'
 import { createVideoFrameSource, type VideoFrameSource } from './videoDecoder'
@@ -193,15 +194,11 @@ async function prerenderAudioMix(project: Project): Promise<RenderedAudio | null
     try {
       const arrayBuffer = await blob.arrayBuffer()
       const decoded = await offlineCtx.decodeAudioData(arrayBuffer)
-      const source = offlineCtx.createBufferSource()
-      source.buffer = decoded
-      source.playbackRate.value = clipRate(data, obj.duration)
       const gain = offlineCtx.createGain()
       scheduleClipGain(gain, data, obj)
-      source.connect(gain)
       gain.connect(offlineCtx.destination)
-      // Trim: start at sourceIn, play only the source span (spec 14 R6).
-      source.start(obj.startTime, srcIn(data), sourceSpan(data))
+      // Pitch-preserving: stretches sped-up/slowed clips to length (see audioMix).
+      scheduleClipSource(offlineCtx, decoded, data, obj, gain)
     } catch {
       continue
     }
@@ -461,18 +458,11 @@ async function exportWithWebCodecs(
         const arrayBuffer = await blob.arrayBuffer()
         const decoded = await offlineCtx.decodeAudioData(arrayBuffer)
 
-        const source = offlineCtx.createBufferSource()
-        source.buffer = decoded
-
-        source.playbackRate.value = clipRate(data, obj.duration)
-
         const gain = offlineCtx.createGain()
         scheduleClipGain(gain, data, obj)
-
-        source.connect(gain)
         gain.connect(offlineCtx.destination)
-        // Trim: start at sourceIn, play only the source span (spec 14 R6).
-        source.start(obj.startTime, srcIn(data), sourceSpan(data))
+        // Pitch-preserving: stretches sped-up/slowed clips to length (see audioMix).
+        scheduleClipSource(offlineCtx, decoded, data, obj, gain)
       } catch {
         continue
       }
@@ -739,18 +729,11 @@ async function exportWithMediaRecorder(
         const arrayBuffer = await blob.arrayBuffer()
         const decoded = await offlineCtx.decodeAudioData(arrayBuffer)
 
-        const source = offlineCtx.createBufferSource()
-        source.buffer = decoded
-
-        source.playbackRate.value = clipRate(data, obj.duration)
-
         const gain = offlineCtx.createGain()
         scheduleClipGain(gain, data, obj)
-
-        source.connect(gain)
         gain.connect(offlineCtx.destination)
-        // Trim: start at sourceIn, play only the source span (spec 14 R6).
-        source.start(obj.startTime, srcIn(data), sourceSpan(data))
+        // Pitch-preserving: stretches sped-up/slowed clips to length (see audioMix).
+        scheduleClipSource(offlineCtx, decoded, data, obj, gain)
       } catch {
         continue
       }
