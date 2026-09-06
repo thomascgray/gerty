@@ -1,4 +1,5 @@
 import type { ArrowData, TextData, FreehandData, ObjectStyle, TextEffect } from '../types'
+import { textEffectsOf } from '../types'
 
 /** Compute the quadratic bezier control point for a segment with curvature */
 function segmentControlPoint(
@@ -340,12 +341,18 @@ export function drawText(
     }
   }
 
-  // --- Text effects (spec 19) ---------------------------------------------------------------
+  // --- Text effects (spec 19 / 37 stack) ----------------------------------------------------
   // Effects wrap the glyph fill loop and are a pure fn of (data, clip-relative `time`), so preview
   // and export stay pixel-identical (R-DET). The background panel above already drew; effects only
   // touch the glyphs. Everything is fully reset by the outer ctx.restore() below (all state is set
   // inside this save scope), so nothing leaks to later objects.
-  const effect = data.effect
+  //
+  // spec 37: `data.effects` is a STACK applied with GROUPED LAST-WINS — effects across different
+  // groups combine (a decoration + a transform + a fill + a per-glyph offset), but within a group
+  // that writes shared ctx state the LAST layer wins: fill (gradient/rainbow/shimmer) → last sets
+  // fillStyle; shadow (glow/shadow) → last sets ctx.shadow*; per-glyph → last sets waveFn. Transforms
+  // (pulse/warble) genuinely compose. `glitch` is its own paint path (last glitch wins).
+  const effects = textEffectsOf(data)
 
   // Fill style: solid style.color by default; gradient/rainbow/shimmer override it spatially/over time.
   let fillStyle: string | CanvasGradient = style.color
@@ -356,8 +363,10 @@ export function drawText(
   let waveFn: ((charIndex: number) => number) | null = null
   // Number of times to repaint every glyph — glow stacks passes to intensify the blur halo.
   let passes = 1
+  // Glitch takes over the paint tail (RGB-split multi-pass); last glitch layer in the stack wins.
+  let glitchEffect: Extract<TextEffect, { kind: 'glitch' }> | null = null
 
-  if (effect) {
+  for (const effect of effects) {
     switch (effect.kind) {
       case 'glow':
         ctx.shadowColor = effect.color
@@ -423,7 +432,8 @@ export function drawText(
       }
       case 'glitch':
         // Handled after layout in the paint tail (needs multiple full-text passes); no per-glyph
-        // setup here. Falls through to the default fill loop being replaced by drawGlitchText below.
+        // setup here. The default fill loop is replaced by drawGlitchText below.
+        glitchEffect = effect
         break
     }
   }
@@ -534,8 +544,8 @@ export function drawText(
     : () => renderText(inLayout, revealChars, null)
 
   ctx.fillStyle = fillStyle
-  if (effect?.kind === 'glitch') {
-    drawGlitchText(ctx, effect, time, scaleFactor, bx, by, bw, bh, fillStyle, renderLines)
+  if (glitchEffect) {
+    drawGlitchText(ctx, glitchEffect, time, scaleFactor, bx, by, bw, bh, fillStyle, renderLines)
   } else {
     for (let p = 0; p < passes; p++) renderLines()
   }

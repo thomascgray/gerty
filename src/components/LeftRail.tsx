@@ -1,16 +1,15 @@
 import { useState, type ComponentType } from 'react'
-import type { TimelineObjectType, AssetMeta, VideoEffectKind } from '../types'
+import type { TimelineObjectType, AssetMeta } from '../types'
 import { getAssetUrl } from '../lib/assetStore'
 import { EFFECT_PRESETS } from '../lib/effectPresets'
 import {
   IconPhoto, IconTypography, IconShape, IconZoomScan,
-  IconArrowUpRight, IconScribble, IconPhotoPlus, IconMusic, IconSquare, IconCircle, IconWaveSine,
+  IconArrowUpRight, IconScribble, IconPhotoPlus, IconMusic, IconSquare, IconCircle, IconWaveSine, IconMicrophone, IconBadgeCc,
   IconChevronLeft, IconChevronRight, IconFilters,
   IconContrast, IconMovie, IconDeviceTv, IconBrush,
   IconPrism, IconSkull, IconSunset2, IconBinoculars, IconVideo, IconMoon,
   type IconProps,
 } from '@tabler/icons-react'
-import { EFFECT_ICON } from './effectIcons'
 
 type TablerIcon = ComponentType<IconProps>
 type RailSection = 'media' | 'text' | 'elements' | 'effects'
@@ -20,9 +19,11 @@ type LeftRailProps = {
   onAddMedia: () => void                    // open the import flow (modal)
   onAddAsset: (assetId: string) => void     // re-add an already-imported asset
   onCreateTTS: () => void                   // spec 32: open the text-to-speech modal
+  onRecord: () => void                      // spec 34: open the microphone recording modal
+  onCreateCaptions: () => void              // spec 35: open the auto-captions modal
   onCreateObject: (type: TimelineObjectType) => void
   onCreateZoom: () => void
-  onCreateEffect: (kind: VideoEffectKind) => void  // spec 23: colour/overlay effects
+  onCreateEffect: () => void                       // spec 37: create an (empty) Full screen effect stack
   onApplyPreset: (presetId: string) => void        // spec 26: apply a named preset stack
 }
 
@@ -51,7 +52,7 @@ const SECTIONS: { id: RailSection; label: string; Icon: TablerIcon }[] = [
  * Subsumes the old header creation clusters and the "+ Asset" trigger, and adds a basic re-addable
  * media library. Collapsible to just the icon rail. Ephemeral view-state (not persisted).
  */
-export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateTTS, onCreateObject, onCreateZoom, onCreateEffect, onApplyPreset }: LeftRailProps) {
+export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateTTS, onRecord, onCreateCaptions, onCreateObject, onCreateZoom, onCreateEffect, onApplyPreset }: LeftRailProps) {
   const [section, setSection] = useState<RailSection>('media')
   const [open, setOpen] = useState(true)
 
@@ -106,7 +107,7 @@ export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateTTS, 
         <div className="w-52 h-full flex flex-col min-h-0 shrink-0">
           {section === 'media' && (
             <div className="flex-1 min-h-0 overflow-y-auto">
-              <MediaSection assets={assets} onAddMedia={onAddMedia} onAddAsset={onAddAsset} onCreateTTS={onCreateTTS} />
+              <MediaSection assets={assets} onAddMedia={onAddMedia} onAddAsset={onAddAsset} onCreateTTS={onCreateTTS} onRecord={onRecord} onCreateCaptions={onCreateCaptions} />
             </div>
           )}
           {section === 'text' && (
@@ -130,31 +131,11 @@ export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateTTS, 
             <div className="flex flex-col flex-1 min-h-0">
             {/* Raw effects: own scroll area, capped to ~half so Presets stay visible below. */}
             <div className="flex-1 min-h-0 overflow-y-auto">
+            {/* spec 37: the 22 per-kind effects collapse into ONE "Full screen effect" — a stack you
+                build up in the panel. Presets below drop a ready-made stack. */}
             <SimpleSection title="Effects" items={[
               { label: 'Camera zoom', Icon: IconZoomScan, onClick: onCreateZoom },
-              { label: 'Black & white', Icon: EFFECT_ICON.grayscale, onClick: () => onCreateEffect('grayscale') },
-              { label: 'Sepia', Icon: EFFECT_ICON.sepia, onClick: () => onCreateEffect('sepia') },
-              { label: 'Invert', Icon: EFFECT_ICON.invert, onClick: () => onCreateEffect('invert') },
-              { label: 'Vignette', Icon: EFFECT_ICON.vignette, onClick: () => onCreateEffect('vignette') },
-              { label: 'Film grain', Icon: EFFECT_ICON.grain, onClick: () => onCreateEffect('grain') },
-              { label: 'Old film', Icon: EFFECT_ICON.oldfilm, onClick: () => onCreateEffect('oldfilm') },
-              // spec 24 (first slice)
-              { label: 'Hue shift', Icon: EFFECT_ICON.hue, onClick: () => onCreateEffect('hue') },
-              { label: 'Contrast crush', Icon: EFFECT_ICON.contrast, onClick: () => onCreateEffect('contrast') },
-              { label: 'Bleach bypass', Icon: EFFECT_ICON.bleach, onClick: () => onCreateEffect('bleach') },
-              { label: 'Light leak', Icon: EFFECT_ICON.lightleak, onClick: () => onCreateEffect('lightleak') },
-              { label: 'Chromatic split', Icon: EFFECT_ICON.chromatic, onClick: () => onCreateEffect('chromatic') },
-              { label: 'Pixelate', Icon: EFFECT_ICON.pixelate, onClick: () => onCreateEffect('pixelate') },
-              { label: 'Gradient map', Icon: EFFECT_ICON.gradientmap, onClick: () => onCreateEffect('gradientmap') },
-              { label: 'Posterize', Icon: EFFECT_ICON.posterize, onClick: () => onCreateEffect('posterize') },
-              { label: 'Duotone', Icon: EFFECT_ICON.threshold, onClick: () => onCreateEffect('threshold') },
-              { label: 'Channel swap', Icon: EFFECT_ICON.channelswap, onClick: () => onCreateEffect('channelswap') },
-              { label: 'Colour isolate', Icon: EFFECT_ICON.colorisolate, onClick: () => onCreateEffect('colorisolate') },
-              { label: 'Dither', Icon: EFFECT_ICON.dither, onClick: () => onCreateEffect('dither') },
-              { label: 'CRT', Icon: EFFECT_ICON.crt, onClick: () => onCreateEffect('crt') },
-              { label: 'VHS', Icon: EFFECT_ICON.vhs, onClick: () => onCreateEffect('vhs') },
-              { label: 'Halftone', Icon: EFFECT_ICON.halftone, onClick: () => onCreateEffect('halftone') },
-              { label: 'Comic ink', Icon: EFFECT_ICON.comic, onClick: () => onCreateEffect('comic') },
+              { label: 'Full screen effect', Icon: IconFilters, onClick: onCreateEffect },
             ]} />
             </div>
             {/* Presets: always-visible lower half, own scroll for overflow. */}
@@ -174,12 +155,22 @@ export default function LeftRail({ assets, onAddMedia, onAddAsset, onCreateTTS, 
   )
 }
 
-function MediaSection({ assets, onAddMedia, onAddAsset, onCreateTTS }: {
+function MediaSection({ assets, onAddMedia, onAddAsset, onCreateTTS, onRecord, onCreateCaptions }: {
   assets: AssetMeta[]
   onAddMedia: () => void
   onAddAsset: (assetId: string) => void
   onCreateTTS: () => void
+  onRecord: () => void
+  onCreateCaptions: () => void
 }) {
+  // Recording needs a secure context + getUserMedia + MediaRecorder; disable the entry point cleanly
+  // rather than opening a modal that can only fail (spec 34 R6).
+  const canRecord =
+    typeof window !== 'undefined' &&
+    window.isSecureContext &&
+    !!navigator.mediaDevices?.getUserMedia &&
+    typeof MediaRecorder !== 'undefined'
+
   return (
     <div className="p-3 flex flex-col gap-3">
       <button
@@ -195,6 +186,23 @@ function MediaSection({ assets, onAddMedia, onAddAsset, onCreateTTS }: {
         className="flex items-center justify-center gap-1.5 w-full py-2 text-sm font-medium bg-surface-muted text-fg border border-border rounded-lg hover:bg-surface-hover cursor-pointer transition-colors"
       >
         <IconWaveSine size={16} stroke={2} /> Text to speech
+      </button>
+
+      <button
+        onClick={canRecord ? onRecord : undefined}
+        disabled={!canRecord}
+        title={canRecord ? 'Record a voiceover from your microphone' : 'Recording needs a secure page (HTTPS or localhost) and microphone support'}
+        className="flex items-center justify-center gap-1.5 w-full py-2 text-sm font-medium bg-surface-muted text-fg border border-border rounded-lg hover:bg-surface-hover disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+      >
+        <IconMicrophone size={16} stroke={2} /> Record voiceover
+      </button>
+
+      <button
+        onClick={onCreateCaptions}
+        title="Auto-generate subtitles from the timeline's speech (in-browser speech recognition)"
+        className="flex items-center justify-center gap-1.5 w-full py-2 text-sm font-medium bg-surface-muted text-fg border border-border rounded-lg hover:bg-surface-hover cursor-pointer transition-colors"
+      >
+        <IconBadgeCc size={16} stroke={2} /> Auto captions
       </button>
 
       {assets.length === 0 ? (

@@ -15,6 +15,7 @@ import type {
   CameraZoom,
   TextData,
   VideoEffect,
+  CaptionTrack,
   AssetMeta,
 } from "../types";
 import { useCanvasRenderer } from "../hooks/useCanvasRenderer";
@@ -49,6 +50,10 @@ import { ContextToolbar, ZoomContextToolbar } from "./ContextToolbar";
 const ARROW_MAX_POINTS = 10;
 const ZOOM_ACCENT = "#f59e0b"; // amber — matches the zoom panel header
 
+// Floating object toolbar (animate / colour / duplicate) hidden for now — users weren't
+// reaching for it. All the code below is intact; flip this back to true to restore it.
+const SHOW_OBJECT_TOOLBAR = false;
+
 // Editor viewport zoom/pan (spec 16 C). Editor-only magnification of the canvas viewer —
 // NOT the camera zoom (spec 13, exported), NOT object resize. 100% (scale 1) = fit-to-window.
 type ViewportState = { scale: number; panX: number; panY: number };
@@ -60,12 +65,11 @@ const MAX_ZOOM = 4;
 const WHEEL_ZOOM_SENSITIVITY = 0.0012;
 const BUTTON_ZOOM_FACTOR = 1.2;
 
-// Clamp a pan offset (px, top-left origin) so the transformed canvas keeps covering the fit box
-// when zoomed in, and stays inside it when zoomed out — no runaway empty margins.
-function clampPan(pan: number, layerSize: number, boxSize: number): number {
-  if (layerSize >= boxSize)
-    return Math.max(boxSize - layerSize, Math.min(0, pan));
-  return Math.max(0, Math.min(boxSize - layerSize, pan));
+// Pan is fully unbounded — the canvas can roam anywhere, including completely out of view, so you
+// can inspect it from any angle. "Fit" (resetViewport) always brings it back. Kept as a function so
+// the zoom-to-cursor math and pan handlers have a single hook if we ever want to clamp again.
+function clampPan(pan: number, _layerSize: number, _boxSize: number): number {
+  return pan;
 }
 
 // === Types ===
@@ -143,6 +147,8 @@ type CanvasProps = {
   onToggleCameraView: () => void;
   // Video effects (spec 23) — colour/overlay post-process; applied in BOTH Frame and Live view.
   effects?: VideoEffect[];
+  // Auto-captions (spec 35) — subtitles drawn on top; shown in BOTH Frame and Live view.
+  captions?: CaptionTrack | null;
   // Floating context toolbar (spec 17 P): "Edit points" for arrow/freehand routes through this.
   onToggleDraw?: () => void;
   // Duplicate routes through App (not a raw dispatch) so the copy lands at the playhead + is selected.
@@ -579,6 +585,7 @@ export default function Canvas({
   cameraView,
   onToggleCameraView,
   effects,
+  captions,
   onToggleDraw,
   onDuplicate,
   assets,
@@ -738,8 +745,9 @@ export default function Canvas({
       activeDrawingObjectId,
       camera: liveCamera,
       effects: resolvedEffects,
+      captions: captions ?? null,
     }),
-    [isLive, activeDrawingObjectId, liveCamera, resolvedEffects],
+    [isLive, activeDrawingObjectId, liveCamera, resolvedEffects, captions],
   );
   // Hide the text object being edited so only the textarea shows it (spec 18-qol R6 — no double image).
   const renderObjects = useMemo(
@@ -1717,6 +1725,7 @@ export default function Canvas({
       ? selectedObject
       : null;
   const showObjectToolbar =
+    SHOW_OBJECT_TOOLBAR &&
     !!toolbarObject &&
     !isPlaying &&
     !isLive &&

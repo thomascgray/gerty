@@ -23,6 +23,15 @@ export type TimelineObject = {
   enter?: Transition      // entrance animation (fade/slide/pop) played as the object appears
   exit?: Transition       // exit animation played as the object disappears
 
+  // Continuously-running ambient "loop" animations (spec 36/37) applied ON TOP of the resolved pose —
+  // e.g. oscillate-zoom, spin, 3D-warble, hue-cycle. Each is a pure fn of clip-relative time (R-DET),
+  // applied in drawObject after keyframes/transitions in list order, so they run no matter where a
+  // keyframe positions the object. Named `loopEffects` (not `loop`) to avoid clashing with
+  // PhotoData.loop (GIF playback). Absent/empty = no modulation. Not keyframable.
+  loopEffects?: LoopEffect[]  // spec 37: ordered stack (shake + bob + ...)
+  // LEGACY (spec 36): a single loop effect. Read-only fallback; normalized into loopEffects[0] on load.
+  loopEffect?: LoopEffect
+
   // Visual style
   style: ObjectStyle
 
@@ -34,6 +43,11 @@ export type TimelineObject = {
   // affected by the camera/zoom transform — a "pinned" overlay that stays put at any zoom.
   // Handled per-object inside renderFrame; default false.
   ignoreCamera?: boolean
+
+  // Auto-captions (spec 35): when true, this audio/video clip is EXCLUDED from the audio mix that
+  // speech recognition transcribes — so music/singing/sfx clips don't confuse the model. Only
+  // meaningful for audio/video objects; default false (included). Does not affect playback/export.
+  excludeFromCaptions?: boolean
 
   // Type-specific payload
   data: PhotoData | ArrowData | TextData | ShapeData | FreehandData | AudioData | VideoData
@@ -156,6 +170,25 @@ export type TextEffect =
 
 export type TextEffectKind = TextEffect['kind']
 
+// Per-object continuous "loop" animation (spec 36). Applied ON TOP of the keyframe-resolved pose as a
+// Canvas-2D ctx modulation inside drawObject, driven by clip-relative time — a pure fn of (object,
+// time) so preview and export stay pixel-identical (R-DET). Generalizes the spec-19 text warble/pulse
+// from glyph level to object level, so any visual object can carry an ambient animation.
+//   - transform kinds (zoom/spin/sway/bob/warble/pulse) → ctx.translate/scale/rotate/transform
+//   - pulse also modulates opacity; rainbow sets ctx.filter = hue-rotate(...)
+//   - shake seeds its jitter from a hash of time (NOT Math.random) so it reproduces frame-for-frame
+export type LoopEffect =
+  | { kind: 'zoom';    speed: number; amount: number }   // scale oscillation about center
+  | { kind: 'spin';    speed: number }                   // continuous rotation (speed = revolutions/sec)
+  | { kind: 'sway';    speed: number; amount: number }   // bounded rotate back-and-forth
+  | { kind: 'bob';     speed: number; amount: number }   // vertical float
+  | { kind: 'warble';  speed: number; amount: number }   // faux-3D axis wobble (reuse text-warble affine)
+  | { kind: 'pulse';   speed: number; amount: number }   // scale + opacity oscillation
+  | { kind: 'shake';   speed: number; amount: number }   // jitter, seeded from time (deterministic)
+  | { kind: 'rainbow'; speed: number }                   // hue cycle via ctx.filter
+
+export type LoopEffectKind = LoopEffect['kind']
+
 export type TextData = {
   content: string
   background?: string
@@ -165,7 +198,9 @@ export type TextData = {
                         // false, style.fontSize is used verbatim (lines still wrap to width)
   cornerRadius?: number // px (project-space, pre-scaleFactor) radius for the background panel corners;
                         // default 0/undefined = square (fillRect). Clamped to half the box in drawText.
-  effect?: TextEffect   // spec 19: optional visual effect beyond plain fill. Absent = rendered as today.
+  effects?: TextEffect[] // spec 37: ordered stack of visual effects (grouped last-wins, see drawText).
+                         // Absent/empty = plain fill (today). Only effects[0] is keyframable (text.effect).
+  effect?: TextEffect   // LEGACY (spec 19): a single effect. Read-only fallback; normalized into effects[0].
 }
 
 export type ShapeData = Record<string, never>
@@ -183,9 +218,13 @@ export type TtsSource = {
   speed: number   // 0.5–2, baked into synthesis
 }
 
+// Auto-level "character" preset (spec 38). Chosen per clip; each maps to a set of leveling params
+// (smoothing/target/boost/cut/gate) in src/lib/loudness.ts. Switchable live (no re-analysis).
+export type AutoLevelMode = 'smooth' | 'balanced' | 'aggressive'
+
 export type AudioData = {
   assetId: string           // reference to asset in asset store
-  volume: number            // 0–1
+  volume: number            // 0–2 (spec 38: was 0–1); raw multiplier, 1 = unity
   muted?: boolean           // when true, this clip's audio is silenced in preview AND export
   originalDuration: number  // seconds — the source file's actual duration
   waveform?: number[]       // ~200 peak values for visualization
@@ -194,11 +233,15 @@ export type AudioData = {
   sourceMin?: number        // recoverable-source window floor: sourceIn can't trim below this; default 0. A split narrows it so the halves read as untrimmed clips (no ghosts).
   sourceMax?: number        // recoverable-source window ceil: sourceOut can't trim past this; default originalDuration
   tts?: TtsSource           // spec 32: present ⇒ a text-to-speech narration clip (enables re-generate)
+  autoLevel?: boolean       // spec 38: apply the dynamic auto-level gain envelope (preview + export)
+  autoLevelMode?: AutoLevelMode  // spec 38: character preset; default 'balanced'
+  autoLevelAmount?: number  // spec 38: 0–1 blend between raw and fully-leveled gain; default 1
+  loudness?: number[]       // spec 38: per-window RMS of the SOURCE (source-time), sampled every ANALYSIS_WINDOW s; analysis basis for auto-level
 }
 
 export type VideoData = {
   assetId: string           // reference to asset in asset store
-  volume: number            // 0–1
+  volume: number            // 0–2 (spec 38: was 0–1)
   muted?: boolean           // when true, the video's audio track is silenced (preview + export); video still shows
   originalDuration: number  // seconds — the source file's actual duration
   waveform?: number[]       // ~200 peak values of the video's audio track, for the timeline bar
@@ -206,6 +249,10 @@ export type VideoData = {
   sourceOut?: number        // trim: source seconds where playback ends; default originalDuration
   sourceMin?: number        // recoverable-source window floor: sourceIn can't trim below this; default 0. A split narrows it so the halves read as untrimmed clips (no ghosts).
   sourceMax?: number        // recoverable-source window ceil: sourceOut can't trim past this; default originalDuration
+  autoLevel?: boolean       // spec 38: apply the dynamic auto-level gain envelope (preview + export)
+  autoLevelMode?: AutoLevelMode  // spec 38: character preset; default 'balanced'
+  autoLevelAmount?: number  // spec 38: 0–1 blend between raw and fully-leveled gain; default 1
+  loudness?: number[]       // spec 38: per-window RMS of the video's audio track (source-time)
 }
 
 // === Camera (spec 13) ===
@@ -342,15 +389,15 @@ export type HalftoneParams = { cell: number; angle: number }    // cell px (2–
 export type ComicParams = { levels: number; thickness: number } // posterized base levels (2–8) + ink line thickness (0.5–3)
 
 
-export type VideoEffect = {
+// A single effect within a "Full screen effect" stack (spec 37): the kind + peak strength + per-kind
+// payload — everything EXCEPT the timeline envelope, which the container (VideoEffect) owns. Its
+// resolved intensity is `intensity * <container's eased envelope factor>`. The per-kind payload set is
+// identical to the pre-37 top-level VideoEffect fields, just moved down a level.
+export type EffectLayer = {
   id: string
   kind: VideoEffectKind
   intensity: number      // 0–1 peak strength: the filter amount (colour) / the darkness (vignette)
-  startTime: number      // global seconds — when the ease-in begins
-  transitionIn: number   // seconds to ramp intensity 0 -> intensity
-  hold: number           // seconds held at full intensity
-  transitionOut: number  // seconds to ramp intensity -> 0
-  easing: EasingKind     // reused spec-12 curve, applied to both ramps (mirrors CameraZoom.easing)
+  hidden?: boolean       // hide THIS layer without deleting it (skipped in resolveEffects)
   vignette?: VignetteParams // present only when kind === 'vignette'
   oldfilm?: OldFilmParams   // present only when kind === 'oldfilm'
   // spec 24 per-kind payloads (present only for their kind):
@@ -367,7 +414,40 @@ export type VideoEffect = {
   vhs?: VhsParams
   halftone?: HalftoneParams
   comic?: ComicParams
-  hidden?: boolean        // spec 14 R11 parity: skipped in resolveEffects when true
+}
+
+// A "Full screen effect" (spec 37): ONE timeline object owning a shared envelope + a STACK of layers.
+// The whole stack fades in/out together on the shared envelope; each layer keeps its own peak
+// intensity + params. Pre-37 this type was a single-kind effect (envelope + one kind + payload); those
+// legacy fields are kept OPTIONAL for load tolerance and normalized into `layers[0]` on load. New code
+// only ever writes `layers`.
+export type VideoEffect = {
+  id: string
+  layers: EffectLayer[]  // spec 37: the stack (>= 1 entry after normalization). Compose order = list order.
+  startTime: number      // global seconds — when the ease-in begins
+  transitionIn: number   // seconds to ramp the envelope factor 0 -> 1
+  hold: number           // seconds held at full
+  transitionOut: number  // seconds to ramp 1 -> 0
+  easing: EasingKind     // reused spec-12 curve, applied to both ramps (mirrors CameraZoom.easing)
+  hidden?: boolean       // spec 14 R11 parity: hides the whole container in resolveEffects when true
+  // LEGACY (pre-37) single-effect fields — read-only fallback for un-normalized data; never written:
+  kind?: VideoEffectKind
+  intensity?: number
+  vignette?: VignetteParams
+  oldfilm?: OldFilmParams
+  hue?: HueParams
+  lightleak?: LightLeakParams
+  chromatic?: ChromaticParams
+  gradientmap?: GradientMapParams
+  posterize?: PosterizeParams
+  threshold?: ThresholdParams
+  channelswap?: ChannelSwapParams
+  colorisolate?: ColorIsolateParams
+  dither?: DitherParams
+  crt?: CrtParams
+  vhs?: VhsParams
+  halftone?: HalftoneParams
+  comic?: ComicParams
 }
 
 // The resolved effect stack at an instant — what renderFrame consumes (mirrors CameraState).
@@ -405,6 +485,46 @@ export type Marker = {
   color?: string    // optional accent hex; default MARKER_COLOR in Timeline
 }
 
+// === Captions (spec 35) ===
+
+// One recognized subtitle line. Times are GLOBAL timeline seconds (not clip-relative), so the
+// renderer picks the active cue with a plain globalTime range test — no per-object mapping. Produced
+// by in-browser speech recognition over the timeline's mixed audio; text is user-editable (R7).
+export type CaptionCue = {
+  id: string
+  startTime: number   // global seconds — when the phrase begins
+  endTime: number     // global seconds — when it ends (> startTime; clamped not to overlap the next)
+  text: string        // the recognized phrase
+}
+
+// How the captions were generated — provenance for Regenerate (mirrors TtsSource's role). v1 only
+// emits mode:'all'; the range fields are reserved so a time-range scope drops in without a migration.
+export type CaptionSource = {
+  mode: 'all' | 'range'
+  rangeStart?: number  // global seconds (mode:'range')
+  rangeEnd?: number    // global seconds (mode:'range')
+}
+
+// Shared subtitle styling for the whole track (all cues render uniformly — the standard subtitle
+// model). Kept small in v1. `position` is a normalized 0–1 vertical anchor for the caption baseline.
+export type CaptionStyle = {
+  fontSize: number      // px in project space (pre-scaleFactor), like TextData/ObjectStyle.fontSize
+  fontFamily: string
+  color: string         // fill
+  background: boolean   // draw a translucent box behind the text for legibility
+  position: number      // normalized 0–1 vertical anchor of the caption (default ~0.9 = near bottom)
+}
+
+// A generated caption track — a project-level entity (NOT a TimelineObject; mirrors CameraZoom /
+// VideoEffect). Rendered by renderFrame as on-canvas subtitles; shown on its own pinned timeline row.
+export type CaptionTrack = {
+  id: string
+  cues: CaptionCue[]
+  source: CaptionSource
+  style: CaptionStyle
+  hidden?: boolean       // spec 14 R11 parity: skipped in render when true
+}
+
 // === Assets ===
 
 export type AssetType = 'image' | 'audio' | 'video'
@@ -440,6 +560,7 @@ export type Project = {
   zooms?: CameraZoom[]      // camera punch-ins (spec 13); optional/additive for back-compat
   markers?: Marker[]        // timeline markers (spec 22); optional/additive for back-compat
   effects?: VideoEffect[]   // render-wide colour/overlay effects (spec 23); optional/additive
+  captions?: CaptionTrack   // auto-generated speech-to-text subtitles (spec 35); optional/additive
 }
 
 // === Interaction Modes ===
@@ -471,6 +592,12 @@ export type ProjectAction =
   | { type: 'UPDATE_EFFECT'; effectId: string; updates: Partial<Omit<VideoEffect, 'id'>> }
   | { type: 'UPDATE_EFFECT_TRANSIENT'; effectId: string; updates: Partial<Omit<VideoEffect, 'id'>> }
   | { type: 'REMOVE_EFFECT'; effectId: string }
+  | { type: 'SET_CAPTIONS'; captions: CaptionTrack }  // spec 35: create/replace the whole track (also = regenerate); one undo
+  | { type: 'UPDATE_CAPTIONS'; updates: Partial<Omit<CaptionTrack, 'id'>> }  // merge style/hidden/source edits
+  | { type: 'UPDATE_CAPTION_CUE'; cueId: string; updates: Partial<Omit<CaptionCue, 'id'>> }  // R7: edit one cue's text/timing
+  | { type: 'ADD_CAPTION_CUE'; cue: CaptionCue }     // insert a new cue (sorted by start)
+  | { type: 'REMOVE_CAPTION_CUE'; cueId: string }    // delete one cue
+  | { type: 'REMOVE_CAPTIONS' }
   | { type: 'ADD_MARKER'; marker: Marker }
   | { type: 'UPDATE_MARKER'; markerId: string; updates: Partial<Omit<Marker, 'id'>> }
   | { type: 'UPDATE_MARKER_TRANSIENT'; markerId: string; updates: Partial<Omit<Marker, 'id'>> }
@@ -509,10 +636,10 @@ export function createCameraZoom(options?: Partial<Omit<CameraZoom, 'id'>>): Cam
   }
 }
 
-// Default parameters for a freshly-created effect (spec 23). Mirrors createCameraZoom's envelope
-// defaults; vignette kinds additionally seed a sensible VignetteParams.
-export function createVideoEffect(kind: VideoEffectKind, options?: Partial<Omit<VideoEffect, 'id' | 'kind'>>): VideoEffect {
-  const effect: VideoEffect = {
+// Default parameters for a freshly-created effect LAYER (spec 37; the per-kind default logic that used
+// to live inline in createVideoEffect). Seeds a sensible peak intensity + per-kind payload.
+export function createEffectLayer(kind: VideoEffectKind, options?: Partial<Omit<EffectLayer, 'id' | 'kind'>>): EffectLayer {
+  const layer: EffectLayer = {
     id: crypto.randomUUID(),
     kind,
     // Grain / old-film / light-leak / chromatic read best subtle — seed them lower than the
@@ -523,61 +650,134 @@ export function createVideoEffect(kind: VideoEffectKind, options?: Partial<Omit<
         : kind === 'pixelate'
           ? 0.4
           : 1),
+    ...(options?.hidden !== undefined && { hidden: options.hidden }),
+  }
+  if (kind === 'vignette') layer.vignette = options?.vignette ?? { shape: 'rectangle', size: 0.6, feather: 0.4 }
+  if (kind === 'oldfilm') layer.oldfilm = options?.oldfilm ?? { wobble: 0 } // steady frame by default; opt into weave
+  // spec 24 per-kind defaults
+  if (kind === 'hue') layer.hue = options?.hue ?? { animate: false, angle: 90, speed: 60 }
+  if (kind === 'lightleak') layer.lightleak = options?.lightleak ?? { color: '#ff7a18', angle: 30, speed: 0.15 }
+  if (kind === 'chromatic') layer.chromatic = options?.chromatic ?? { offset: 8, angle: 0 }
+  if (kind === 'gradientmap') layer.gradientmap = options?.gradientmap ?? { preset: 'thermal' }
+  if (kind === 'posterize') layer.posterize = options?.posterize ?? { levels: 5 }
+  if (kind === 'threshold') layer.threshold = options?.threshold ?? { dark: '#1a1a2e', light: '#e8e8e8', threshold: 0.5 }
+  if (kind === 'channelswap') layer.channelswap = options?.channelswap ?? { mapping: 'brg' }
+  if (kind === 'colorisolate') layer.colorisolate = options?.colorisolate ?? { hue: 0, tolerance: 30 }
+  if (kind === 'dither') layer.dither = options?.dither ?? { levels: 3, scale: 2 }
+  if (kind === 'crt') layer.crt = options?.crt ?? { curvature: 0.3, scanline: 0.5 }
+  if (kind === 'vhs') layer.vhs = options?.vhs ?? { bleed: 0.5, noise: 0.4 }
+  if (kind === 'halftone') layer.halftone = options?.halftone ?? { cell: 6, angle: 45 }
+  if (kind === 'comic') layer.comic = options?.comic ?? { levels: 4, thickness: 1 }
+  return layer
+}
+
+// Default parameters for a freshly-created Full screen effect CONTAINER (spec 37). Mirrors
+// createCameraZoom's envelope defaults; starts with an empty (or caller-supplied) layer stack. No
+// in/out ramp by default so a freshly-added effect shows at full strength immediately; the user can
+// dial in a fade from the panel. Presets pass their own layers/hold.
+export function createVideoEffect(
+  options?: Partial<Pick<VideoEffect, 'layers' | 'startTime' | 'transitionIn' | 'hold' | 'transitionOut' | 'easing' | 'hidden'>>,
+): VideoEffect {
+  return {
+    id: crypto.randomUUID(),
+    layers: options?.layers ?? [],
     startTime: options?.startTime ?? 0,
-    // Default to no in/out ramp so a freshly-added effect shows at full strength immediately;
-    // the user can dial in a fade from the panel. Presets can still pass their own transitions.
     transitionIn: options?.transitionIn ?? 0,
     hold: options?.hold ?? 2,
     transitionOut: options?.transitionOut ?? 0,
     easing: options?.easing ?? 'easeInOutCubic',
+    ...(options?.hidden !== undefined && { hidden: options.hidden }),
   }
-  if (kind === 'vignette') {
-    effect.vignette = options?.vignette ?? { shape: 'rectangle', size: 0.6, feather: 0.4 }
+}
+
+// === spec 37: legacy → stack normalization + tolerant readers ===================================
+// New code writes only the stack fields (loopEffects / TextData.effects / VideoEffect.layers). Old
+// projects carry the singular fields; `normalizeProject` upgrades them at load so the rest of the app
+// only ever sees stacks. The `*Of` readers are a belt-and-braces fallback used at the render choke
+// points, so even an un-normalized in-memory object renders correctly.
+
+/** The loop-effect stack for an object, tolerating the legacy singular `loopEffect`. */
+export function loopEffectsOf(obj: TimelineObject): LoopEffect[] {
+  if (obj.loopEffects && obj.loopEffects.length > 0) return obj.loopEffects
+  return obj.loopEffect ? [obj.loopEffect] : []
+}
+
+/** The text-effect stack for a text object's data, tolerating the legacy singular `effect`. */
+export function textEffectsOf(data: TextData): TextEffect[] {
+  if (data.effects && data.effects.length > 0) return data.effects
+  return data.effect ? [data.effect] : []
+}
+
+/** The layer stack for a Full screen effect, tolerating a legacy single-kind VideoEffect. */
+export function layersOf(effect: VideoEffect): EffectLayer[] {
+  if (effect.layers && effect.layers.length > 0) return effect.layers
+  return legacyEffectLayers(effect)
+}
+
+// Build the one-layer stack a legacy single-kind VideoEffect implies (or [] if it carried no kind).
+function legacyEffectLayers(e: VideoEffect): EffectLayer[] {
+  if (!e.kind) return []
+  return [{
+    id: `${e.id}-l0`,
+    kind: e.kind,
+    intensity: e.intensity ?? 1,
+    vignette: e.vignette,
+    oldfilm: e.oldfilm,
+    hue: e.hue,
+    lightleak: e.lightleak,
+    chromatic: e.chromatic,
+    gradientmap: e.gradientmap,
+    posterize: e.posterize,
+    threshold: e.threshold,
+    channelswap: e.channelswap,
+    colorisolate: e.colorisolate,
+    dither: e.dither,
+    crt: e.crt,
+    vhs: e.vhs,
+    halftone: e.halftone,
+    comic: e.comic,
+  }]
+}
+
+// Upgrade a legacy single-kind VideoEffect to the container shape, stripping the legacy top-level
+// payload fields. A record already in the new shape (has a non-empty `layers`) is returned as-is.
+export function normalizeVideoEffect(e: VideoEffect): VideoEffect {
+  if (e.layers && e.layers.length > 0) return e
+  return {
+    id: e.id,
+    layers: legacyEffectLayers(e),
+    startTime: e.startTime,
+    transitionIn: e.transitionIn,
+    hold: e.hold,
+    transitionOut: e.transitionOut,
+    easing: e.easing,
+    ...(e.hidden !== undefined && { hidden: e.hidden }),
   }
-  if (kind === 'oldfilm') {
-    effect.oldfilm = options?.oldfilm ?? { wobble: 0 } // steady frame by default; opt into weave
+}
+
+// Upgrade a single object's legacy singular effect fields (loop + text) into their stacks.
+function normalizeObject(obj: TimelineObject): TimelineObject {
+  let next = obj
+  if ((!obj.loopEffects || obj.loopEffects.length === 0) && obj.loopEffect) {
+    next = { ...next, loopEffects: [obj.loopEffect], loopEffect: undefined }
   }
-  // spec 24 per-kind defaults
-  if (kind === 'hue') {
-    effect.hue = options?.hue ?? { animate: false, angle: 90, speed: 60 }
+  if (obj.type === 'text') {
+    const d = next.data as TextData
+    if ((!d.effects || d.effects.length === 0) && d.effect) {
+      next = { ...next, data: { ...d, effects: [d.effect], effect: undefined } }
+    }
   }
-  if (kind === 'lightleak') {
-    effect.lightleak = options?.lightleak ?? { color: '#ff7a18', angle: 30, speed: 0.15 }
+  return next
+}
+
+// Normalize a freshly-loaded project (localStorage / .gerty) so every legacy singular effect field is
+// upgraded to a stack. Additive + idempotent: a project already in the new shape is unchanged.
+export function normalizeProject(project: Project): Project {
+  return {
+    ...project,
+    objects: project.objects.map(normalizeObject),
+    ...(project.effects && { effects: project.effects.map(normalizeVideoEffect) }),
   }
-  if (kind === 'chromatic') {
-    effect.chromatic = options?.chromatic ?? { offset: 8, angle: 0 }
-  }
-  if (kind === 'gradientmap') {
-    effect.gradientmap = options?.gradientmap ?? { preset: 'thermal' }
-  }
-  if (kind === 'posterize') {
-    effect.posterize = options?.posterize ?? { levels: 5 }
-  }
-  if (kind === 'threshold') {
-    effect.threshold = options?.threshold ?? { dark: '#1a1a2e', light: '#e8e8e8', threshold: 0.5 }
-  }
-  if (kind === 'channelswap') {
-    effect.channelswap = options?.channelswap ?? { mapping: 'brg' }
-  }
-  if (kind === 'colorisolate') {
-    effect.colorisolate = options?.colorisolate ?? { hue: 0, tolerance: 30 }
-  }
-  if (kind === 'dither') {
-    effect.dither = options?.dither ?? { levels: 3, scale: 2 }
-  }
-  if (kind === 'crt') {
-    effect.crt = options?.crt ?? { curvature: 0.3, scanline: 0.5 }
-  }
-  if (kind === 'vhs') {
-    effect.vhs = options?.vhs ?? { bleed: 0.5, noise: 0.4 }
-  }
-  if (kind === 'halftone') {
-    effect.halftone = options?.halftone ?? { cell: 6, angle: 45 }
-  }
-  if (kind === 'comic') {
-    effect.comic = options?.comic ?? { levels: 4, thickness: 1 }
-  }
-  return effect
 }
 
 // A freshly-created marker at the given time (defaults to 0). label/color left unset so the
@@ -588,6 +788,33 @@ export function createMarker(options?: Partial<Omit<Marker, 'id'>>): Marker {
     time: options?.time ?? 0,
     ...(options?.label !== undefined && { label: options.label }),
     ...(options?.color !== undefined && { color: options.color }),
+  }
+}
+
+// Default subtitle styling for a fresh caption track (spec 35). White text near the bottom with a
+// translucent backing box — the legible default; the user can tweak size/colour/position in the panel.
+export const DEFAULT_CAPTION_STYLE: CaptionStyle = {
+  fontSize: 48,
+  fontFamily: 'sans-serif',
+  color: '#ffffff',
+  background: true,
+  position: 0.9,
+}
+
+export function createCaptionCue(startTime: number, endTime: number, text = ''): CaptionCue {
+  return { id: crypto.randomUUID(), startTime, endTime, text }
+}
+
+export function createCaptionTrack(
+  cues: CaptionCue[],
+  source: CaptionSource,
+  options?: { style?: Partial<CaptionStyle> },
+): CaptionTrack {
+  return {
+    id: crypto.randomUUID(),
+    cues,
+    source,
+    style: { ...DEFAULT_CAPTION_STYLE, ...options?.style },
   }
 }
 

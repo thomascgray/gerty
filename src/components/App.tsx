@@ -1,13 +1,13 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
-import type { InteractionMode, TimelineObjectType, TimelineObject, ArrowData, FreehandData, VideoEffectKind, PhotoData, AudioData } from '../types'
-import { createTimelineObject, createCameraZoom, createVideoEffect, createMarker } from '../types'
+import type { InteractionMode, TimelineObjectType, TimelineObject, ArrowData, FreehandData, PhotoData, AudioData, CaptionCue } from '../types'
+import { createTimelineObject, createCameraZoom, createVideoEffect, createMarker, createCaptionTrack } from '../types'
 import { getRememberedStyle, getRememberedData } from '../lib/objectDefaults'
-import { EFFECT_PRESETS, buildPresetEffects } from '../lib/effectPresets'
+import { EFFECT_PRESETS, buildPresetEffect } from '../lib/effectPresets'
 import { useProject } from '../hooks/useProject'
 import { usePlayback } from '../hooks/usePlayback'
 import { useAudioPlayback } from '../hooks/useAudioPlayback'
 import { useUiPrefs } from '../hooks/useUiPrefs'
-import { loadAssetsFromDB, clearAllAssets, getAssetBlob, generateWaveform, isSupportedMediaFile, storeAsset } from '../lib/assetStore'
+import { loadAssetsFromDB, clearAllAssets, getAssetBlob, generateWaveform, decodeAudio, isSupportedMediaFile, storeAsset } from '../lib/assetStore'
 import { exportProjectBrep, importProjectBrep } from '../lib/projectStorage'
 import { downloadOriginal, downloadProcessed } from '../lib/objectDownload'
 import { pushToast, dismissToast } from '../hooks/useToasts'
@@ -23,6 +23,9 @@ import ImportModal from './ImportModal'
 import TtsModal from './TtsModal'
 import type { TtsParams } from './TtsModal'
 import type { TtsResult } from '../lib/tts'
+import RecordModal from './RecordModal'
+import CaptionsModal from './CaptionsModal'
+import type { RecordResult } from './RecordModal'
 import ExportModal from './ExportModal'
 import AppearanceControls from './AppearanceControls'
 import HotkeysModal from './HotkeysModal'
@@ -86,7 +89,14 @@ export default function App() {
   const [selectedObjectIds, setSelectedObjectIds] = useState<string[]>([])
   const selectedObjectId = selectedObjectIds.length === 1 ? selectedObjectIds[0] : null
   const [selectedZoomId, setSelectedZoomId] = useState<string | null>(null)
-  const [selectedEffectId, setSelectedEffectId] = useState<string | null>(null)
+  // Effects mirror the object multi-select model: `selectedEffectIds` is the source of truth (shift-
+  // click to add/remove); `selectedEffectId` is the single "primary" that drives the panel editor,
+  // non-null only when EXACTLY one effect is selected. A multi-effect selection is a bulk tool (no
+  // panel), same as objects. Still mutually exclusive with object/zoom/caption selection.
+  const [selectedEffectIds, setSelectedEffectIds] = useState<string[]>([])
+  const selectedEffectId = selectedEffectIds.length === 1 ? selectedEffectIds[0] : null
+  // Caption track selection (spec 35): mutually exclusive with object/zoom/effect selection.
+  const [selectedCaptionId, setSelectedCaptionId] = useState<string | null>(null)
   // Camera view (spec 13): 'frame' = author un-zoomed with a framing rectangle; 'live' = apply the
   // real transform (WYSIWYG, matches export). Pure view state — not persisted, not part of undo.
   const [cameraView, setCameraView] = useState<'frame' | 'live'>('frame')
@@ -94,6 +104,10 @@ export default function App() {
   // Text-to-speech modal (spec 32). `create` builds a new narration clip; `edit` re-generates the
   // audio of the clip `editId`, pre-filled from its stored `tts` params.
   const [ttsModal, setTtsModal] = useState<{ mode: 'create' | 'edit'; editId?: string; initial?: TtsParams } | null>(null)
+  // Microphone recording modal (spec 34): captures a take and drops it as an audio clip at the playhead.
+  const [showRecord, setShowRecord] = useState(false)
+  // Auto-captions modal (spec 35): 'create' generates a new track; 'edit' regenerates the existing one.
+  const [captionsModal, setCaptionsModal] = useState<{ mode: 'create' | 'edit' } | null>(null)
   const [showExport, setShowExport] = useState(false)
   const [showHotkeys, setShowHotkeys] = useState(false)
   const [showChangelog, setShowChangelog] = useState(false)
@@ -143,6 +157,7 @@ export default function App() {
   const selectedObject = project.objects.find((o) => o.id === selectedObjectId) ?? null
   const selectedZoom = project.zooms?.find((z) => z.id === selectedZoomId) ?? null
   const selectedEffect = project.effects?.find((e) => e.id === selectedEffectId) ?? null
+  const selectedCaption = project.captions && project.captions.id === selectedCaptionId ? project.captions : null
 
   // Draw mode only enabled when an arrow or freehand object is selected
   const drawEnabled = selectedObject != null && (selectedObject.type === 'arrow' || selectedObject.type === 'freehand')
@@ -279,8 +294,9 @@ export default function App() {
     const last = withLanes[withLanes.length - 1]
     if (last) {
       setSelectedObjectIds([last.id])
-      setSelectedZoomId(null) // object/zoom/effect selection are mutually exclusive
-      setSelectedEffectId(null)
+      setSelectedZoomId(null) // object/zoom/effect/caption selection are mutually exclusive
+      setSelectedEffectIds([])
+      setSelectedCaptionId(null)
     }
     // Adding/importing anything drops back to Frame view so the new object is visible + editable
     // (Live view hides the whole scene outside the zoom and disables editing).
@@ -370,6 +386,37 @@ export default function App() {
     }
   }, [ttsModal, project.objects, dispatch, playback.globalTime, addObjects])
 
+  // === Microphone recording (spec 34) ===
+  // Commit a mic take: store the recorded blob as an audio asset, then create the clip at the playhead.
+  // Same shape as handleTTSConfirm minus the tts/edit branches. Duration + waveform come from ONE
+  // decode of the blob (AudioBuffer.duration is exact and sidesteps the MediaRecorder-WebM
+  // `duration === Infinity` trap); the recorder's elapsed-time hint is the fallback if decode fails.
+  const handleRecordConfirm = useCallback(async (rec: RecordResult) => {
+    setShowRecord(false)
+    const subtype = (rec.blob.type.split(';')[0].split('/')[1] || 'webm').toLowerCase()
+    const ext = subtype === 'mp4' ? 'm4a' : subtype
+    const { meta, blob } = await storeAsset(new File([rec.blob], `Recording.${ext}`, { type: rec.blob.type }))
+
+    let duration = rec.duration
+    let waveform: number[] | undefined
+    try {
+      const decoded = await decodeAudio(blob)
+      duration = decoded.duration
+      waveform = decoded.peaks
+    } catch {
+      // Undecodable for a waveform — keep the elapsed-time duration; the timeline bar just omits peaks.
+    }
+    meta.duration = duration
+    dispatch({ type: 'ADD_ASSETS', assets: [meta] })
+
+    const obj = createTimelineObject(
+      'audio',
+      { assetId: meta.id, volume: 1, originalDuration: duration, waveform, sourceIn: 0, sourceOut: duration },
+      { startTime: playback.globalTime, duration, name: 'Recording' },
+    )
+    addObjects([obj])
+  }, [dispatch, playback.globalTime, addObjects])
+
   const handleCreateObject = useCallback((type: TimelineObjectType) => {
     const defaultData: Record<TimelineObjectType, () => ReturnType<typeof createTimelineObject>['data']> = {
       arrow: () => ({ points: [], headSize: 20, curvature: 0, progressiveHead: true }),
@@ -423,7 +470,8 @@ export default function App() {
     dispatch({ type: 'ADD_ZOOM', zoom })
     setSelectedObjectIds([])
     setSelectedZoomId(zoom.id)
-    setSelectedEffectId(null)
+    setSelectedEffectIds([])
+    setSelectedCaptionId(null)
     setDrawingObjectId(null)
     setCameraView('frame') // author the new zoom un-zoomed with its framing rectangle (R8/R15)
   }, [playback.globalTime, dispatch])
@@ -431,45 +479,87 @@ export default function App() {
   const handleSelectZoom = useCallback((id: string | null) => {
     setSelectedZoomId(id)
     if (id) {
-      setSelectedObjectIds([]) // object/zoom/effect selection are mutually exclusive
-      setSelectedEffectId(null)
+      setSelectedObjectIds([]) // object/zoom/effect/caption selection are mutually exclusive
+      setSelectedEffectIds([])
+      setSelectedCaptionId(null)
       setDrawingObjectId(null)
     }
   }, [])
 
   // Create a video effect (spec 23) at the playhead: mirrors handleCreateZoom. Select it (clearing
   // object + zoom selection) so its editor is immediately shown in the panel.
-  const handleCreateEffect = useCallback((kind: VideoEffectKind) => {
-    const effect = createVideoEffect(kind, { startTime: playback.globalTime })
+  // Create a Full screen effect (spec 37) at the playhead: an EMPTY container, selected so the panel
+  // shows its stack editor (which opens the add-layer picker when the stack is empty, OQ7).
+  const handleCreateEffect = useCallback(() => {
+    const effect = createVideoEffect({ startTime: playback.globalTime })
     dispatch({ type: 'ADD_EFFECT', effect })
     setSelectedObjectIds([])
     setSelectedZoomId(null)
-    setSelectedEffectId(effect.id)
+    setSelectedEffectIds([effect.id])
+    setSelectedCaptionId(null)
     setDrawingObjectId(null)
   }, [playback.globalTime, dispatch])
 
-  // Apply an effect preset (spec 26): build its stack at the playhead and add it as ONE undo entry.
-  // Select the first effect so the panel confirms something landed; the rest show on the Effects track.
+  // Apply an effect preset (spec 26 / 37): build ONE container whose layer stack is the preset, added
+  // as one undo entry. Select it so the panel confirms something landed and shows the stack.
   const handleApplyPreset = useCallback((presetId: string) => {
     const preset = EFFECT_PRESETS.find((p) => p.id === presetId)
     if (!preset) return
-    const effects = buildPresetEffects(preset, playback.globalTime)
-    if (effects.length === 0) return
-    dispatch({ type: 'ADD_EFFECTS', effects })
+    const effect = buildPresetEffect(preset, playback.globalTime)
+    if (effect.layers.length === 0) return
+    dispatch({ type: 'ADD_EFFECT', effect })
     setSelectedObjectIds([])
     setSelectedZoomId(null)
-    setSelectedEffectId(effects[0].id)
+    setSelectedEffectIds([effect.id])
+    setSelectedCaptionId(null)
     setDrawingObjectId(null)
   }, [playback.globalTime, dispatch])
 
-  const handleSelectEffect = useCallback((id: string | null) => {
-    setSelectedEffectId(id)
+  // `additive` (shift-click on the Effects track) toggles the id in/out of the effect multi-selection
+  // instead of replacing it — letting the user gather effects to delete them together. Mirrors
+  // handleSelectObject. Any effect selection clears object/zoom/caption selection (mutually exclusive).
+  const handleSelectEffect = useCallback((id: string | null, additive = false) => {
+    if (id && additive) {
+      setSelectedObjectIds([]); setSelectedZoomId(null); setSelectedCaptionId(null); setDrawingObjectId(null)
+      setSelectedEffectIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]))
+      return
+    }
+    setSelectedEffectIds(id ? [id] : [])
     if (id) {
-      setSelectedObjectIds([]) // object/zoom/effect selection are mutually exclusive
+      setSelectedObjectIds([]) // object/zoom/effect/caption selection are mutually exclusive
       setSelectedZoomId(null)
+      setSelectedCaptionId(null)
       setDrawingObjectId(null)
     }
   }, [])
+
+  // --- Auto-captions (spec 35) ---------------------------------------------------------------------
+  const handleCreateCaptions = useCallback(() => {
+    // 'edit' when a track already exists (regenerate); otherwise 'create'.
+    setCaptionsModal({ mode: project.captions ? 'edit' : 'create' })
+  }, [project.captions])
+
+  const handleSelectCaptions = useCallback((id: string | null) => {
+    setSelectedCaptionId(id)
+    if (id) {
+      setSelectedObjectIds([]) // object/zoom/effect/caption selection are mutually exclusive
+      setSelectedZoomId(null)
+      setSelectedEffectIds([])
+      setDrawingObjectId(null)
+    }
+  }, [])
+
+  // Commit generated cues: create the track (or replace it on regenerate), preserving style/id where
+  // possible so a regenerate keeps the user's styling. Selects the track. One undo entry.
+  const handleCaptionsConfirm = useCallback((cues: CaptionCue[]) => {
+    const existing = project.captions
+    const track = existing
+      ? { ...existing, cues, source: { mode: 'all' as const } }
+      : createCaptionTrack(cues, { mode: 'all' })
+    dispatch({ type: 'SET_CAPTIONS', captions: track })
+    setCaptionsModal(null)
+    handleSelectCaptions(track.id)
+  }, [project.captions, dispatch, handleSelectCaptions])
 
   const toggleCameraView = useCallback(() => {
     setCameraView((v) => (v === 'frame' ? 'live' : 'frame'))
@@ -570,14 +660,19 @@ export default function App() {
           setDrawingObjectId(null)
           setSelectedObjectIds([])
           setSelectedZoomId(null)
-          setSelectedEffectId(null)
+          setSelectedEffectIds([])
+          setSelectedCaptionId(null)
         }
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedZoom) {
         dispatch({ type: 'REMOVE_ZOOM', zoomId: selectedZoom.id })
         setSelectedZoomId(null)
-      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedEffect) {
-        dispatch({ type: 'REMOVE_EFFECT', effectId: selectedEffect.id })
-        setSelectedEffectId(null)
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedEffectIds.length > 0) {
+        // Deletes the whole effect selection — one effect or a shift-selected group.
+        for (const id of selectedEffectIds) dispatch({ type: 'REMOVE_EFFECT', effectId: id })
+        setSelectedEffectIds([])
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedCaption) {
+        dispatch({ type: 'REMOVE_CAPTIONS' })
+        setSelectedCaptionId(null)
       } else if (e.key === 'Backspace' && interactionMode === 'draw' && selectedObject?.type === 'arrow') {
         // Remove last arrow point
         e.preventDefault()
@@ -604,18 +699,18 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [playback, interactionMode, selectedObject, selectedObjectIds, selectedZoom, selectedEffect, drawEnabled, dispatch, undo, redo, handleFinishArrow, toggleCameraView, handleAddMarker, handleStepMarker])
+  }, [playback, interactionMode, selectedObject, selectedObjectIds, selectedZoom, selectedEffectIds, selectedCaption, drawEnabled, dispatch, undo, redo, handleFinishArrow, toggleCameraView, handleAddMarker, handleStepMarker])
 
   // `additive` (shift-click from the timeline) toggles the id in/out of the multi-selection instead
   // of replacing it — letting the user gather clips across lanes to move them in time together.
   const handleSelectObject = useCallback((id: string | null, additive = false) => {
     if (id && additive) {
-      setSelectedZoomId(null); setSelectedEffectId(null); setDrawingObjectId(null)
+      setSelectedZoomId(null); setSelectedEffectIds([]); setSelectedCaptionId(null); setDrawingObjectId(null)
       setSelectedObjectIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]))
       return
     }
     setSelectedObjectIds(id ? [id] : [])
-    if (id) { setSelectedZoomId(null); setSelectedEffectId(null) } // object/zoom/effect selection are mutually exclusive
+    if (id) { setSelectedZoomId(null); setSelectedEffectIds([]); setSelectedCaptionId(null) } // object/zoom/effect/caption selection are mutually exclusive
     // Selecting no longer auto-enters draw (spec 17 M) — selection means "move". Re-edit an
     // arrow/freehand's points via the panel's "Edit points". Selecting away finishes any drawing.
     setDrawingObjectId(null)
@@ -808,6 +903,8 @@ export default function App() {
           onAddMedia={() => setShowImport(true)}
           onAddAsset={handleAddExistingAsset}
           onCreateTTS={handleCreateTTS}
+          onRecord={() => setShowRecord(true)}
+          onCreateCaptions={handleCreateCaptions}
           onCreateObject={handleCreateObject}
           onCreateZoom={handleCreateZoom}
           onCreateEffect={handleCreateEffect}
@@ -830,6 +927,7 @@ export default function App() {
           cameraView={cameraView}
           onToggleCameraView={toggleCameraView}
           effects={project.effects}
+          captions={project.captions}
           onToggleDraw={handleToggleDrawSelected}
           onDuplicate={handleDuplicateObject}
           assets={project.assets}
@@ -861,6 +959,8 @@ export default function App() {
           object={selectedObject}
           zoom={selectedZoom}
           effect={selectedEffect}
+          caption={selectedCaption}
+          onRegenerateCaptions={handleCreateCaptions}
           dispatch={dispatch}
           globalTime={playback.globalTime}
           onSeek={playback.seek}
@@ -915,8 +1015,11 @@ export default function App() {
                 selectedZoomId={selectedZoomId}
                 onSelectZoom={handleSelectZoom}
                 effects={project.effects}
-                selectedEffectId={selectedEffectId}
+                selectedEffectIds={selectedEffectIds}
                 onSelectEffect={handleSelectEffect}
+                captions={project.captions}
+                selectedCaptionId={selectedCaptionId}
+                onSelectCaptions={handleSelectCaptions}
                 markers={project.markers}
                 onCollapse={() => setTimelineCollapsed(true)}
               />
@@ -941,6 +1044,17 @@ export default function App() {
           initial={ttsModal.initial}
           onClose={() => setTtsModal(null)}
           onConfirm={handleTTSConfirm}
+        />
+      )}
+      {showRecord && (
+        <RecordModal onClose={() => setShowRecord(false)} onConfirm={handleRecordConfirm} />
+      )}
+      {captionsModal && (
+        <CaptionsModal
+          mode={captionsModal.mode}
+          project={project}
+          onClose={() => setCaptionsModal(null)}
+          onConfirm={handleCaptionsConfirm}
         />
       )}
       {showExport && <ExportModal project={project} onClose={() => setShowExport(false)} />}

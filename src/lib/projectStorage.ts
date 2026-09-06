@@ -1,6 +1,6 @@
 import JSZip from 'jszip'
 import type { Project } from '../types'
-import { createDefaultProject } from '../types'
+import { createDefaultProject, normalizeProject } from '../types'
 import { getAssetBlob, storeAssetBlob } from './assetStore'
 
 const STORAGE_KEY = 'gerty-project'
@@ -20,7 +20,8 @@ export function loadProject(): Project {
       const parsed = JSON.parse(data)
       if (parsed.objects && Array.isArray(parsed.objects)) {
         if (!parsed.assets) parsed.assets = []
-        return parsed as Project
+        // spec 37: upgrade legacy singular effect fields to stacks before the app sees the project.
+        return normalizeProject(parsed as Project)
       }
       localStorage.removeItem(STORAGE_KEY)
     }
@@ -73,7 +74,7 @@ export async function importProjectBrep(file: File): Promise<Project> {
   if (!projectJson) throw new Error('Invalid .gerty file: missing project.json')
 
   const projectText = await projectJson.async('text')
-  const project = JSON.parse(projectText) as Project
+  const project = normalizeProject(JSON.parse(projectText) as Project)
   if (!project.assets) project.assets = []
 
   // Extract and store all assets

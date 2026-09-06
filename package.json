@@ -9,9 +9,11 @@
     "build": "node scripts/setup-tts-vendor.mjs && tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "fetch-tts-model": "node scripts/fetch-tts-model.mjs"
+    "fetch-tts-model": "node scripts/fetch-tts-model.mjs",
+    "fetch-captions-model": "node scripts/fetch-captions-model.mjs"
   },
   "dependencies": {
+    "@huggingface/transformers": "^3.7.5",
     "@tabler/icons-react": "^3.44.0",
     "@tailwindcss/vite": "^4.2.1",
     "jszip": "^3.10.1",

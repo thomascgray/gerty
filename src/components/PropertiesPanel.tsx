@@ -2,15 +2,20 @@ import { useState } from 'react'
 import {
   IconClock, IconArrowsMove, IconVector, IconLogin, IconLogout, IconDiamond,
   IconVolume, IconPalette, IconTypography, IconArrowUpRight, IconFocusCentered, IconChevronDown,
-  IconFilters, IconMusic, IconWaveSine,
+  IconFilters, IconMusic, IconWaveSine, IconBadgeCc, IconTrash,
+  IconArrowUp, IconArrowDown, IconEye, IconEyeOff, IconPlus,
 } from '@tabler/icons-react'
+import { createCaptionCue, createEffectLayer, loopEffectsOf, textEffectsOf } from '../types'
 import { EFFECT_ICON } from './effectIcons'
 import type {
   TimelineObject, ProjectAction, ArrowData, AudioData, VideoData, TextData, TextAlign, PhotoData,
-  AnimatableProperty, AnimatableChannel, ChannelValue, TextEffect, EasingKind, CameraZoom,
-  VideoEffect, VideoEffectKind, VignetteShape, GradientMapPreset, ChannelSwapMapping, AssetMeta,
+  AnimatableProperty, AnimatableChannel, ChannelValue, EasingKind, CameraZoom,
+  VideoEffect, EffectLayer, VideoEffectKind, VignetteShape, GradientMapPreset, ChannelSwapMapping, AssetMeta,
+  CaptionTrack, AutoLevelMode,
 } from '../types'
 import { getDownloadOptions } from '../lib/objectDownload'
+import { analyzeAssetLoudness } from '../lib/assetStore'
+import { DEFAULT_AUTO_LEVEL_MODE, DEFAULT_AUTO_LEVEL_AMOUNT } from '../lib/loudness'
 import {
   KF_EPS, effVal as kfEffVal, editPose, editChannel, toggleChannel, addKeyframeAt, keyframeColor,
   channelValueAt, animatedChannels, declares, declaredChannels, channelsFor, CHANNELS_BY_KEY,
@@ -24,7 +29,7 @@ import { toHexColor as hexOf } from '../lib/color'
 import { srcIn, srcOut, sourceSpan, srcMin, srcMax, RATE_MIN, RATE_MAX } from '../lib/mediaTiming'
 import { rememberObjectStyle, rememberObjectData } from '../lib/objectDefaults'
 import {
-  Field, NumberInput, TransitionFields, TypeOnBar, EffectFields, KeyframeDot,
+  Field, NumberInput, TransitionFields, TypeOnBar, EffectFieldsStack, LoopFieldsStack, KeyframeDot,
   KeyframeTrack, KeyframeStatus, ZoomKeyframeTrack, MotionPicker, LeadInField, SELECT_CLS,
 } from './propertyControls'
 
@@ -32,6 +37,9 @@ type PropertiesPanelProps = {
   object: TimelineObject | null
   zoom?: CameraZoom | null
   effect?: VideoEffect | null
+  caption?: CaptionTrack | null
+  // Re-open the auto-captions modal to regenerate the track (spec 35).
+  onRegenerateCaptions?: () => void
   dispatch: React.Dispatch<ProjectAction>
   globalTime: number
   onSeek: (t: number) => void
@@ -49,13 +57,151 @@ type PropertiesPanelProps = {
   assets?: AssetMeta[]
 }
 
-export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, globalTime, onSeek, isDrawing, onToggleDraw, onDuplicate, onDownload, onEditNarration, assets }: PropertiesPanelProps) {
-  // A selected zoom or effect takes over the panel (all three selections are mutually exclusive).
+/**
+ * Audio accordion for an audio/video clip (spec 38): mute, volume (0-200%), auto-level (dynamic
+ * loudness balancing with switchable modes + amount), and skip-captions. Its own component so it can
+ * hold the one-shot "analyzing" state without adding a hook to the early-returning main panel.
+ */
+function AudioControls({ obj, dispatch }: { obj: TimelineObject; dispatch: (action: ProjectAction) => void }) {
+  const md = obj.data as AudioData | VideoData
+  const muted = md.muted ?? false
+  const autoLevel = md.autoLevel ?? false
+  const mode = md.autoLevelMode ?? DEFAULT_AUTO_LEVEL_MODE
+  const amount = md.autoLevelAmount ?? DEFAULT_AUTO_LEVEL_AMOUNT
+  const [analyzing, setAnalyzing] = useState(false)
+
+  const update = (updates: Partial<Omit<TimelineObject, 'id' | 'type'>>) =>
+    dispatch({ type: 'UPDATE_OBJECT', objectId: obj.id, updates })
+
+  // Enable auto-level: analyze the source ONCE (lazily), cache it on the clip, then flip on. Re-enabling
+  // an already-analyzed clip is instant. Disabling keeps the cache (and mode/amount) for next time.
+  const toggleAutoLevel = async (on: boolean) => {
+    if (!on) {
+      update({ data: { ...md, autoLevel: false } })
+      return
+    }
+    const enable = (loudness: number[]) =>
+      update({ data: { ...md, autoLevel: true, autoLevelMode: mode, autoLevelAmount: amount, loudness } })
+    if (md.loudness && md.loudness.length > 0) {
+      enable(md.loudness)
+      return
+    }
+    setAnalyzing(true)
+    const loudness = await analyzeAssetLoudness(md.assetId)
+    setAnalyzing(false)
+    if (loudness) enable(loudness)
+  }
+
+  const MODES: { key: AutoLevelMode; label: string; title: string }[] = [
+    { key: 'smooth', label: 'Smooth', title: 'Gentle, slow drift correction - most natural, best for loud-start/quiet-end clips' },
+    { key: 'balanced', label: 'Balanced', title: 'Moderate leveling - a good general default' },
+    { key: 'aggressive', label: 'Aggressive', title: 'Fast, near-flat leveling - for very uneven or very quiet sources' },
+  ]
+
+  return (
+    <Accordion title="Audio">
+      <Field label="Mute">
+        <input
+          type="checkbox"
+          checked={muted}
+          onChange={(e) => update({ data: { ...md, muted: e.target.checked } })}
+          title={obj.type === 'video'
+            ? "Silence this video's audio track in preview and export (the video still shows)"
+            : "Silence this clip in preview and export"}
+          className="accent-accent cursor-pointer"
+        />
+      </Field>
+      <Field label="Volume">
+        <div className={`flex items-center gap-2 w-full ${muted ? 'opacity-40' : ''}`}>
+          <input
+            type="range"
+            min={0} max={200} step={1}
+            value={Math.round(md.volume * 100)}
+            disabled={muted}
+            onChange={(e) => update({ data: { ...md, volume: Number(e.target.value) / 100 } })}
+            title="Clip volume (up to 200% to boost a quietly-recorded source)"
+            className="w-full"
+          />
+          <span className="text-[10px] text-subtle tabular-nums w-8 text-right">
+            {Math.round(md.volume * 100)}%
+          </span>
+        </div>
+      </Field>
+      {/* Auto-level (spec 38): dynamic loudness balancing across the clip. */}
+      <Field label="Auto level">
+        <input
+          type="checkbox"
+          checked={autoLevel}
+          disabled={analyzing}
+          onChange={(e) => toggleAutoLevel(e.target.checked)}
+          title="Even out loudness across this clip (boosts quiet stretches, tames loud ones). Applies in preview and export."
+          className="accent-accent cursor-pointer"
+        />
+      </Field>
+      {analyzing && (
+        <div className="text-[10px] text-subtle mb-2 pl-1">Analyzing...</div>
+      )}
+      {autoLevel && !analyzing && (
+        <>
+          <Field label="Mode">
+            <div className="flex gap-1 w-full">
+              {MODES.map((m) => (
+                <button
+                  key={m.key}
+                  onClick={() => update({ data: { ...md, autoLevelMode: m.key } })}
+                  title={m.title}
+                  className={`flex-1 px-1 py-0.5 text-[10px] rounded cursor-pointer transition-colors ${
+                    mode === m.key ? 'bg-accent text-accent-contrast' : 'bg-surface-muted text-muted hover:bg-surface-hover'
+                  }`}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+          </Field>
+          <Field label="Amount">
+            <div className="flex items-center gap-2 w-full">
+              <input
+                type="range"
+                min={0} max={100} step={1}
+                value={Math.round(amount * 100)}
+                onChange={(e) => update({ data: { ...md, autoLevelAmount: Number(e.target.value) / 100 } })}
+                title="How strongly to level: 0% = off, 100% = fully even"
+                className="w-full"
+              />
+              <span className="text-[10px] text-subtle tabular-nums w-8 text-right">
+                {Math.round(amount * 100)}%
+              </span>
+            </div>
+          </Field>
+        </>
+      )}
+      {/* Auto-captions (spec 35): exclude this clip from the speech-recognition mix, so music /
+          singing / sfx don't confuse the transcriber. Doesn't affect playback or export. */}
+      <Field label="Skip captions">
+        <input
+          type="checkbox"
+          checked={obj.excludeFromCaptions ?? false}
+          onChange={(e) => update({ excludeFromCaptions: e.target.checked })}
+          title="Exclude this clip from auto-captions (e.g. music or background audio). Regenerate captions to apply."
+          className="accent-accent cursor-pointer"
+        />
+      </Field>
+    </Accordion>
+  )
+}
+
+export default function PropertiesPanel({ object: obj, zoom, effect, caption, onRegenerateCaptions, dispatch, globalTime, onSeek, isDrawing, onToggleDraw, onDuplicate, onDownload, onEditNarration, assets }: PropertiesPanelProps) {
+  // A selected zoom, effect, or caption track takes over the panel (all mutually exclusive).
   if (zoom) {
     return <ZoomEditor zoom={zoom} dispatch={dispatch} globalTime={globalTime} onSeek={onSeek} />
   }
   if (effect) {
-    return <EffectEditor effect={effect} dispatch={dispatch} globalTime={globalTime} onSeek={onSeek} />
+    // key by id so the add-layer picker's open state resets when a different effect is selected.
+    return <EffectEditor key={effect.id} effect={effect} dispatch={dispatch} globalTime={globalTime} onSeek={onSeek} />
+  }
+  if (caption) {
+    return <CaptionEditor caption={caption} dispatch={dispatch} globalTime={globalTime} onSeek={onSeek} onRegenerate={onRegenerateCaptions} />
   }
 
   if (!obj) {
@@ -458,41 +604,10 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
         )
       })()}
 
-      {/* Volume (audio/video) */}
-      {(obj.type === 'audio' || obj.type === 'video') && (() => {
-        const md = obj.data as AudioData | VideoData
-        const muted = md.muted ?? false
-        return (
-          <Accordion title="Audio">
-            <Field label="Mute">
-              <input
-                type="checkbox"
-                checked={muted}
-                onChange={(e) => update({ data: { ...md, muted: e.target.checked } })}
-                title={obj.type === 'video'
-                  ? "Silence this video's audio track in preview and export (the video still shows)"
-                  : "Silence this clip in preview and export"}
-                className="accent-accent cursor-pointer"
-              />
-            </Field>
-            <Field label="Volume">
-              <div className={`flex items-center gap-2 w-full ${muted ? 'opacity-40' : ''}`}>
-                <input
-                  type="range"
-                  min={0} max={100} step={1}
-                  value={Math.round(md.volume * 100)}
-                  disabled={muted}
-                  onChange={(e) => update({ data: { ...md, volume: Number(e.target.value) / 100 } })}
-                  className="w-full"
-                />
-                <span className="text-[10px] text-subtle tabular-nums w-8 text-right">
-                  {Math.round(md.volume * 100)}%
-                </span>
-              </div>
-            </Field>
-          </Accordion>
-        )
-      })()}
+      {/* Volume / mute / auto-level (audio/video) */}
+      {(obj.type === 'audio' || obj.type === 'video') && (
+        <AudioControls obj={obj} dispatch={dispatch} />
+      )}
 
       {/* Style (for non-photo, non-audio, non-video objects) */}
       {obj.type !== 'photo' && obj.type !== 'audio' && obj.type !== 'video' && (
@@ -644,16 +759,27 @@ export default function PropertiesPanel({ object: obj, zoom, effect, dispatch, g
         </Accordion>
       )}
 
-      {/* Text effects (spec 19): one effect per text object; "None" removes it. */}
+      {/* Loop / motion effects (spec 36/37): a STACK of continuous ambient animations on any visual
+          object. Edits the `loopEffects` TimelineObject field directly (not a keyframe channel) via
+          UPDATE_OBJECT; reads via loopEffectsOf so a legacy single loopEffect still shows. */}
+      {obj.type !== 'audio' && (
+        <Accordion title="Motion" icon={<IconArrowsMove size={14} />}>
+          <LoopFieldsStack
+            value={loopEffectsOf(obj)}
+            onChange={(loopEffects) => update({ loopEffects, loopEffect: undefined })}
+          />
+        </Accordion>
+      )}
+
+      {/* Text effects (spec 19 / 37 stack): a STACK of glyph effects per text object; combine by
+          grouped last-wins (see drawText). Edits data.effects via UPDATE_OBJECT (reads via
+          textEffectsOf so a legacy single effect still shows). Only the first layer is keyframable
+          (OQ2), resolved in the renderer via the text.effect channel — not surfaced here in v1. */}
       {obj.type === 'text' && (
         <Accordion title="Effects" {...secProps('Effects')}>
-          <div className="flex items-center gap-1">
-            {dotFor('text.effect')}
-            <span className="text-muted text-xs">Effect</span>
-          </div>
-          <EffectFields
-            value={chan('text.effect') as TextEffect | undefined}
-            onChange={(effect) => setChan('text.effect', effect)}
+          <EffectFieldsStack
+            value={textEffectsOf(obj.data as TextData)}
+            onChange={(effects) => update({ data: { ...(obj.data as TextData), effects, effect: undefined } })}
           />
         </Accordion>
       )}
@@ -1051,86 +1177,232 @@ function hexToHue(hex: string): number {
   return h < 0 ? h + 360 : h
 }
 
+const CAPTION_COLOR = '#0ea5e9' // sky blue — distinct from zoom amber / effect fuchsia
+
 /**
- * Editor for a selected video effect (spec 23) — mirrors ZoomEditor. Shared controls (intensity +
- * timing envelope + motion) plus a vignette-only Shape/Size/Feather block. Kind is fixed at creation.
+ * Editor for the selected caption track (spec 35). Regenerate + hide + basic subtitle style, plus an
+ * editable list of cues so the user can correct anything the speech recognition got wrong (R7).
  */
-function EffectEditor({
-  effect, dispatch, globalTime, onSeek,
+function CaptionEditor({
+  caption, dispatch, globalTime, onSeek, onRegenerate,
 }: {
-  effect: VideoEffect
+  caption: CaptionTrack
   dispatch: React.Dispatch<ProjectAction>
   globalTime: number
   onSeek: (t: number) => void
+  onRegenerate?: () => void
 }) {
-  const update = (updates: Partial<Omit<VideoEffect, 'id'>>) =>
-    dispatch({ type: 'UPDATE_EFFECT', effectId: effect.id, updates })
-  const updateTransient = (updates: Partial<Omit<VideoEffect, 'id'>>) =>
-    dispatch({ type: 'UPDATE_EFFECT_TRANSIENT', effectId: effect.id, updates })
-  const commit = () => dispatch({ type: 'COMMIT_TRANSIENT' })
+  const style = caption.style
+  const updateStyle = (patch: Partial<CaptionTrack['style']>) =>
+    dispatch({ type: 'UPDATE_CAPTIONS', updates: { style: { ...style, ...patch } } })
 
-  const envelope = effect.transitionIn + effect.hold + effect.transitionOut
-  const end = effect.startTime + envelope
-  const withinSpan = globalTime >= effect.startTime && globalTime <= end
-  const vig = effect.vignette
-  const old = effect.oldfilm
-  const hue = effect.hue
-  const leak = effect.lightleak
-  const chroma = effect.chromatic
-  const gmap = effect.gradientmap
-  const post = effect.posterize
-  const duo = effect.threshold
-  const swap = effect.channelswap
-  const iso = effect.colorisolate
-  const dith = effect.dither
-  const crt = effect.crt
-  const vhs = effect.vhs
-  const half = effect.halftone
-  const comic = effect.comic
-
-  // Update one vignette param (dispatched whole — UPDATE_EFFECT shallow-merges the top level only).
-  const updateVignette = (patch: Partial<NonNullable<VideoEffect['vignette']>>) => {
-    if (!vig) return
-    update({ vignette: { ...vig, ...patch } })
-  }
+  const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`
 
   return (
     <div className="w-64 bg-surface border-l border-border p-4 overflow-y-auto text-sm">
       <div
         className="mb-4 flex items-center gap-2 px-2 py-1.5 rounded text-white text-xs font-semibold"
-        style={{ background: EFFECT_COLOR }}
+        style={{ background: CAPTION_COLOR }}
       >
-        <IconFilters size={15} stroke={2} />
-        <span>{EFFECT_LABEL[effect.kind]}</span>
+        <IconBadgeCc size={15} stroke={2} />
+        <span>Captions</span>
       </div>
       <p className="text-[10px] text-subtle mb-4 -mt-2">
-        A render-wide effect. Drag its bar on the timeline to move or lengthen it; it fades in / out
-        over the ease in / out. Applies in both Frame and Live view.
+        Auto-generated from the timeline's speech. Edit any wording below, or regenerate after
+        changing the audio. Shown in both Frame and Live view, and burned into exports.
       </p>
 
-      {/* Intensity — peak strength; fades in/out via the envelope */}
+      <div className="flex flex-col gap-2 mb-4">
+        <button
+          onClick={onRegenerate}
+          className="w-full py-2 text-xs font-medium rounded-lg bg-surface-muted text-fg border border-border hover:bg-surface-hover cursor-pointer transition-colors"
+        >
+          Regenerate captions
+        </button>
+        <label className="flex items-center gap-2 text-xs text-fg cursor-pointer">
+          <input
+            type="checkbox"
+            checked={caption.hidden ?? false}
+            onChange={(e) => dispatch({ type: 'UPDATE_CAPTIONS', updates: { hidden: e.target.checked } })}
+          />
+          Hide captions
+        </label>
+      </div>
+
       <Accordion title="Style" defaultOpen>
-        <Field label="Intensity">
+        <Field label="Size">
           <div className="flex items-center gap-2 w-full">
             <input
-              type="range"
-              min={0} max={100} step={1}
-              value={Math.round(effect.intensity * 100)}
-              onChange={(e) => updateTransient({ intensity: Number(e.target.value) / 100 })}
-              onPointerUp={commit}
-              onKeyUp={commit}
+              type="range" min={16} max={120} step={1}
+              value={Math.round(style.fontSize)}
+              onChange={(e) => updateStyle({ fontSize: Number(e.target.value) })}
               className="w-full"
             />
-            <span className="text-[10px] text-subtle tabular-nums w-8 text-right">
-              {Math.round(effect.intensity * 100)}%
-            </span>
+            <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{Math.round(style.fontSize)}</span>
           </div>
+        </Field>
+        <Field label="Colour">
+          <input
+            type="color"
+            value={hexOf(style.color, '#ffffff')}
+            onChange={(e) => updateStyle({ color: e.target.value })}
+            className="w-8 h-6 rounded cursor-pointer bg-transparent"
+          />
+        </Field>
+        <Field label="Position">
+          <div className="flex items-center gap-2 w-full">
+            <input
+              type="range" min={0} max={100} step={1}
+              value={Math.round(style.position * 100)}
+              onChange={(e) => updateStyle({ position: Number(e.target.value) / 100 })}
+              className="w-full"
+            />
+            <span className="text-[10px] text-subtle tabular-nums w-8 text-right">{Math.round(style.position * 100)}%</span>
+          </div>
+        </Field>
+        <Field label="Background">
+          <input
+            type="checkbox"
+            checked={style.background}
+            onChange={(e) => updateStyle({ background: e.target.checked })}
+          />
         </Field>
       </Accordion>
 
+      <Accordion title={`Captions (${caption.cues.length})`} defaultOpen>
+        <div className="flex flex-col gap-2">
+          {/* Add a new empty cue at the playhead (2s long) — user then types the text. */}
+          <button
+            onClick={() => dispatch({ type: 'ADD_CAPTION_CUE', cue: createCaptionCue(globalTime, globalTime + 2, '') })}
+            className="w-full py-1.5 text-[11px] font-medium rounded-lg bg-surface-muted text-fg border border-border hover:bg-surface-hover cursor-pointer transition-colors"
+          >
+            + Add caption at playhead
+          </button>
+
+          {caption.cues.map((cue) => {
+            const active = globalTime >= cue.startTime && globalTime < cue.endTime
+            const updateCue = (updates: Partial<Omit<typeof cue, 'id'>>) =>
+              dispatch({ type: 'UPDATE_CAPTION_CUE', cueId: cue.id, updates })
+            return (
+              <div key={cue.id} className={`rounded-lg border p-1.5 ${active ? 'border-accent' : 'border-border'}`}>
+                <div className="flex items-center justify-between mb-1">
+                  <button
+                    onClick={() => onSeek(cue.startTime)}
+                    className="text-[10px] font-mono tabular-nums text-subtle hover:text-fg cursor-pointer"
+                    title="Jump to this caption"
+                  >
+                    {fmt(cue.startTime)} – {fmt(cue.endTime)}
+                  </button>
+                  <button
+                    onClick={() => dispatch({ type: 'REMOVE_CAPTION_CUE', cueId: cue.id })}
+                    className="text-subtle hover:text-danger cursor-pointer"
+                    title="Delete this caption"
+                  >
+                    <IconTrash size={13} stroke={2} />
+                  </button>
+                </div>
+                <textarea
+                  value={cue.text}
+                  onChange={(e) => updateCue({ text: e.target.value })}
+                  rows={2}
+                  className="w-full resize-none rounded bg-surface-muted border border-border px-2 py-1 text-xs text-fg focus:outline-none focus:border-accent mb-1"
+                />
+                {/* Timing: start + end in seconds. End is clamped above start so a cue never inverts. */}
+                <div className="flex items-center gap-1.5">
+                  <label className="flex items-center gap-1 text-[10px] text-subtle">
+                    Start
+                    <input
+                      type="number" min={0} step={0.1}
+                      value={Number(cue.startTime.toFixed(2))}
+                      onChange={(e) => {
+                        const start = Math.max(0, Number(e.target.value))
+                        updateCue({ startTime: start, endTime: Math.max(start + 0.1, cue.endTime) })
+                      }}
+                      className="w-14 rounded bg-surface-muted border border-border px-1 py-0.5 text-[11px] text-fg focus:outline-none focus:border-accent"
+                    />
+                  </label>
+                  <label className="flex items-center gap-1 text-[10px] text-subtle">
+                    End
+                    <input
+                      type="number" min={0} step={0.1}
+                      value={Number(cue.endTime.toFixed(2))}
+                      onChange={(e) => updateCue({ endTime: Math.max(cue.startTime + 0.1, Number(e.target.value)) })}
+                      className="w-14 rounded bg-surface-muted border border-border px-1 py-0.5 text-[11px] text-fg focus:outline-none focus:border-accent"
+                    />
+                  </label>
+                </div>
+              </div>
+            )
+          })}
+          {caption.cues.length === 0 && (
+            <p className="text-[11px] text-subtle">No captions yet.</p>
+          )}
+        </div>
+      </Accordion>
+    </div>
+  )
+}
+
+// Every effect kind, for the "add effect" picker (spec 37). Order = the LeftRail Effects order.
+const ALL_EFFECT_KINDS = Object.keys(EFFECT_LABEL) as VideoEffectKind[]
+
+/**
+ * Per-layer parameter fields (spec 37) for one effect inside a Full screen effect stack: Intensity +
+ * the per-kind param block. Extracted verbatim from the old single-effect editor; `update` /
+ * `updateTransient` now patch THIS layer within the container's `layers` array (the container editor
+ * wires those). Kind is fixed at add-time — no switcher.
+ */
+function LayerFields({ layer, update, updateTransient, commit }: {
+  layer: EffectLayer
+  update: (patch: Partial<Omit<EffectLayer, 'id' | 'kind'>>) => void
+  updateTransient: (patch: Partial<Omit<EffectLayer, 'id' | 'kind'>>) => void
+  commit: () => void
+}) {
+  const vig = layer.vignette
+  const old = layer.oldfilm
+  const hue = layer.hue
+  const leak = layer.lightleak
+  const chroma = layer.chromatic
+  const gmap = layer.gradientmap
+  const post = layer.posterize
+  const duo = layer.threshold
+  const swap = layer.channelswap
+  const iso = layer.colorisolate
+  const dith = layer.dither
+  const crt = layer.crt
+  const vhs = layer.vhs
+  const half = layer.halftone
+  const comic = layer.comic
+
+  // Update one vignette param (dispatched whole — the container shallow-merges layer fields).
+  const updateVignette = (patch: Partial<NonNullable<EffectLayer['vignette']>>) => {
+    if (!vig) return
+    update({ vignette: { ...vig, ...patch } })
+  }
+
+  return (
+    <>
+      {/* Intensity — peak strength; fades in/out via the container's shared envelope */}
+      <Field label="Intensity">
+        <div className="flex items-center gap-2 w-full">
+          <input
+            type="range"
+            min={0} max={100} step={1}
+            value={Math.round(layer.intensity * 100)}
+            onChange={(e) => updateTransient({ intensity: Number(e.target.value) / 100 })}
+            onPointerUp={commit}
+            onKeyUp={commit}
+            className="w-full"
+          />
+          <span className="text-[10px] text-subtle tabular-nums w-8 text-right">
+            {Math.round(layer.intensity * 100)}%
+          </span>
+        </div>
+      </Field>
+
       {/* Vignette-only shape controls */}
-      {effect.kind === 'vignette' && vig && (
-        <Accordion title="Vignette" icon={effectIcon(effect.kind)} defaultOpen>
+      {layer.kind === 'vignette' && vig && (
+        <Accordion title="Vignette" icon={effectIcon(layer.kind)} defaultOpen>
           <Field label="Shape">
             <select
               value={vig.shape}
@@ -1173,8 +1445,8 @@ function EffectEditor({
       )}
 
       {/* Old-film-only wobble (gate weave) — decoupled from intensity, defaults to 0 */}
-      {effect.kind === 'oldfilm' && old && (
-        <Accordion title="Old Film" icon={effectIcon(effect.kind)} defaultOpen>
+      {layer.kind === 'oldfilm' && old && (
+        <Accordion title="Old Film" icon={effectIcon(layer.kind)} defaultOpen>
           <Field label="Wobble">
             <div className="flex items-center gap-2 w-full">
               <input
@@ -1194,8 +1466,8 @@ function EffectEditor({
       )}
 
       {/* Hue shift (spec 24): static angle, or an animated psychedelic cycle */}
-      {effect.kind === 'hue' && hue && (
-        <Accordion title="Hue" icon={effectIcon(effect.kind)} defaultOpen>
+      {layer.kind === 'hue' && hue && (
+        <Accordion title="Hue" icon={effectIcon(layer.kind)} defaultOpen>
           <Field label="Animate">
             <input
               type="checkbox"
@@ -1238,8 +1510,8 @@ function EffectEditor({
       )}
 
       {/* Light leak (spec 24): colour, streak angle, drift speed */}
-      {effect.kind === 'lightleak' && leak && (
-        <Accordion title="Light Leak" icon={effectIcon(effect.kind)} defaultOpen>
+      {layer.kind === 'lightleak' && leak && (
+        <Accordion title="Light Leak" icon={effectIcon(layer.kind)} defaultOpen>
           <Field label="Colour">
             <input
               type="color"
@@ -1277,8 +1549,8 @@ function EffectEditor({
       )}
 
       {/* Chromatic split (spec 24): separation distance + direction */}
-      {effect.kind === 'chromatic' && chroma && (
-        <Accordion title="Chromatic" icon={effectIcon(effect.kind)} defaultOpen>
+      {layer.kind === 'chromatic' && chroma && (
+        <Accordion title="Chromatic" icon={effectIcon(layer.kind)} defaultOpen>
           <Field label="Offset">
             <div className="flex items-center gap-2 w-full">
               <input
@@ -1308,8 +1580,8 @@ function EffectEditor({
       )}
 
       {/* Gradient map (spec 25, WebGL): choose the false-colour ramp */}
-      {effect.kind === 'gradientmap' && gmap && (
-        <Accordion title="Gradient Map" icon={effectIcon(effect.kind)} defaultOpen>
+      {layer.kind === 'gradientmap' && gmap && (
+        <Accordion title="Gradient Map" icon={effectIcon(layer.kind)} defaultOpen>
           <Field label="Ramp">
             <select
               value={gmap.preset}
@@ -1329,8 +1601,8 @@ function EffectEditor({
       )}
 
       {/* Posterize (spec 25, WebGL): quantize to N bands per channel */}
-      {effect.kind === 'posterize' && post && (
-        <Accordion title="Posterize" icon={effectIcon(effect.kind)} defaultOpen>
+      {layer.kind === 'posterize' && post && (
+        <Accordion title="Posterize" icon={effectIcon(layer.kind)} defaultOpen>
           <Field label="Levels">
             <div className="flex items-center gap-2 w-full">
               <input
@@ -1348,8 +1620,8 @@ function EffectEditor({
       )}
 
       {/* Duotone / threshold (spec 25, WebGL): two colours split by luminance */}
-      {effect.kind === 'threshold' && duo && (
-        <Accordion title="Duotone" icon={effectIcon(effect.kind)} defaultOpen>
+      {layer.kind === 'threshold' && duo && (
+        <Accordion title="Duotone" icon={effectIcon(layer.kind)} defaultOpen>
           <Field label="Dark">
             <input
               type="color"
@@ -1385,8 +1657,8 @@ function EffectEditor({
       )}
 
       {/* Channel swap (spec 25, WebGL): permute RGB */}
-      {effect.kind === 'channelswap' && swap && (
-        <Accordion title="Channel Swap" icon={effectIcon(effect.kind)} defaultOpen>
+      {layer.kind === 'channelswap' && swap && (
+        <Accordion title="Channel Swap" icon={effectIcon(layer.kind)} defaultOpen>
           <Field label="Mapping">
             <select
               value={swap.mapping}
@@ -1405,8 +1677,8 @@ function EffectEditor({
       )}
 
       {/* Colour isolation (spec 25, WebGL): keep one hue, desaturate the rest */}
-      {effect.kind === 'colorisolate' && iso && (
-        <Accordion title="Colour Isolate" icon={effectIcon(effect.kind)} defaultOpen>
+      {layer.kind === 'colorisolate' && iso && (
+        <Accordion title="Colour Isolate" icon={effectIcon(layer.kind)} defaultOpen>
           <Field label="Colour">
             <input
               type="color"
@@ -1433,8 +1705,8 @@ function EffectEditor({
       )}
 
       {/* Dither (spec 25, WebGL): ordered Bayer dithering + quantization */}
-      {effect.kind === 'dither' && dith && (
-        <Accordion title="Dither" icon={effectIcon(effect.kind)} defaultOpen>
+      {layer.kind === 'dither' && dith && (
+        <Accordion title="Dither" icon={effectIcon(layer.kind)} defaultOpen>
           <Field label="Levels">
             <div className="flex items-center gap-2 w-full">
               <input
@@ -1464,8 +1736,8 @@ function EffectEditor({
       )}
 
       {/* CRT (spec 25, WebGL): barrel curvature + scanlines + phosphor mask */}
-      {effect.kind === 'crt' && crt && (
-        <Accordion title="CRT" icon={effectIcon(effect.kind)} defaultOpen>
+      {layer.kind === 'crt' && crt && (
+        <Accordion title="CRT" icon={effectIcon(layer.kind)} defaultOpen>
           <Field label="Curvature">
             <div className="flex items-center gap-2 w-full">
               <input
@@ -1495,8 +1767,8 @@ function EffectEditor({
       )}
 
       {/* VHS (spec 25, WebGL, animated): chroma bleed + tracking noise */}
-      {effect.kind === 'vhs' && vhs && (
-        <Accordion title="VHS" icon={effectIcon(effect.kind)} defaultOpen>
+      {layer.kind === 'vhs' && vhs && (
+        <Accordion title="VHS" icon={effectIcon(layer.kind)} defaultOpen>
           <Field label="Chroma bleed">
             <div className="flex items-center gap-2 w-full">
               <input
@@ -1526,8 +1798,8 @@ function EffectEditor({
       )}
 
       {/* Halftone (spec 25, WebGL): comic dot screen */}
-      {effect.kind === 'halftone' && half && (
-        <Accordion title="Halftone" icon={effectIcon(effect.kind)} defaultOpen>
+      {layer.kind === 'halftone' && half && (
+        <Accordion title="Halftone" icon={effectIcon(layer.kind)} defaultOpen>
           <Field label="Dot size">
             <div className="flex items-center gap-2 w-full">
               <input
@@ -1557,8 +1829,8 @@ function EffectEditor({
       )}
 
       {/* Comic ink (spec 25, WebGL): Sobel edges over a posterized base */}
-      {effect.kind === 'comic' && comic && (
-        <Accordion title="Comic Ink" icon={effectIcon(effect.kind)} defaultOpen>
+      {layer.kind === 'comic' && comic && (
+        <Accordion title="Comic Ink" icon={effectIcon(layer.kind)} defaultOpen>
           <Field label="Colours">
             <div className="flex items-center gap-2 w-full">
               <input
@@ -1586,8 +1858,155 @@ function EffectEditor({
           <p className="text-[10px] text-subtle">Sobel edge-detect ink lines over a posterized base. Ink = line thickness.</p>
         </Accordion>
       )}
+    </>
+  )
+}
 
-      {/* Timing envelope — identical shape to the zoom's */}
+/**
+ * Editor for a selected Full screen effect (spec 37) — a STACK of layers sharing one timeline
+ * envelope. Renders the layer list (each with a header: reorder / hide / remove, then its LayerFields),
+ * an add-effect picker, then the shared Timing envelope + delete-container. Mirrors ZoomEditor's
+ * envelope controls; the per-layer params come from LayerFields.
+ */
+function EffectEditor({
+  effect, dispatch, globalTime, onSeek,
+}: {
+  effect: VideoEffect
+  dispatch: React.Dispatch<ProjectAction>
+  globalTime: number
+  onSeek: (t: number) => void
+}) {
+  const update = (updates: Partial<Omit<VideoEffect, 'id'>>) =>
+    dispatch({ type: 'UPDATE_EFFECT', effectId: effect.id, updates })
+  const updateTransient = (updates: Partial<Omit<VideoEffect, 'id'>>) =>
+    dispatch({ type: 'UPDATE_EFFECT_TRANSIENT', effectId: effect.id, updates })
+  const commit = () => dispatch({ type: 'COMMIT_TRANSIENT' })
+
+  const layers = effect.layers
+  // Patch layer i within the stack (dispatched whole — the reducer shallow-merges the container level).
+  const patchLayer = (i: number, patch: Partial<Omit<EffectLayer, 'id' | 'kind'>>) =>
+    update({ layers: layers.map((l, j) => (j === i ? { ...l, ...patch } : l)) })
+  const patchLayerTransient = (i: number, patch: Partial<Omit<EffectLayer, 'id' | 'kind'>>) =>
+    updateTransient({ layers: layers.map((l, j) => (j === i ? { ...l, ...patch } : l)) })
+  const removeLayer = (i: number) => update({ layers: layers.filter((_, j) => j !== i) })
+  const moveLayer = (i: number, dir: -1 | 1) => {
+    const j = i + dir
+    if (j < 0 || j >= layers.length) return
+    const next = [...layers]
+    ;[next[i], next[j]] = [next[j], next[i]]
+    update({ layers: next })
+  }
+  const addLayer = (kind: VideoEffectKind) => update({ layers: [...layers, createEffectLayer(kind)] })
+
+  // OQ7: when a fresh container has no layers, open the add-effect picker straight away.
+  const [addOpen, setAddOpen] = useState(layers.length === 0)
+
+  const envelope = effect.transitionIn + effect.hold + effect.transitionOut
+  const end = effect.startTime + envelope
+  const withinSpan = globalTime >= effect.startTime && globalTime <= end
+
+  return (
+    <div className="w-64 bg-surface border-l border-border p-4 overflow-y-auto text-sm">
+      <div
+        className="mb-4 flex items-center gap-2 px-2 py-1.5 rounded text-white text-xs font-semibold"
+        style={{ background: EFFECT_COLOR }}
+      >
+        <IconFilters size={15} stroke={2} />
+        <span>Full screen effect</span>
+      </div>
+      <p className="text-[10px] text-subtle mb-4 -mt-2">
+        A stack of render-wide effects that fade in / out together on one envelope. Drag its bar on the
+        timeline to move or lengthen it. Applies in both Frame and Live view.
+      </p>
+
+      {/* Layer stack — each effect in the container, in compose order (top applies first) */}
+      {layers.map((layer, i) => (
+        <div key={layer.id} className="mb-2 overflow-hidden rounded-lg border border-border bg-surface-muted/40">
+          <div className="flex items-center gap-1.5 px-2 py-1.5 border-b border-border bg-surface-muted/60">
+            <span className="text-subtle">{effectIcon(layer.kind)}</span>
+            <span className={`flex-1 text-[11px] font-semibold truncate ${layer.hidden ? 'text-subtle line-through' : 'text-fg'}`}>
+              {EFFECT_LABEL[layer.kind]}
+            </span>
+            <button
+              onClick={() => moveLayer(i, -1)} disabled={i === 0}
+              className="p-0.5 text-subtle hover:text-fg disabled:opacity-30 disabled:cursor-default cursor-pointer"
+              title="Move up (applies earlier)"
+            >
+              <IconArrowUp size={13} stroke={2} />
+            </button>
+            <button
+              onClick={() => moveLayer(i, 1)} disabled={i === layers.length - 1}
+              className="p-0.5 text-subtle hover:text-fg disabled:opacity-30 disabled:cursor-default cursor-pointer"
+              title="Move down (applies later)"
+            >
+              <IconArrowDown size={13} stroke={2} />
+            </button>
+            <button
+              onClick={() => patchLayer(i, { hidden: !layer.hidden })}
+              className="p-0.5 text-subtle hover:text-fg cursor-pointer"
+              title={layer.hidden ? 'Show layer' : 'Hide layer'}
+            >
+              {layer.hidden ? <IconEyeOff size={13} stroke={2} /> : <IconEye size={13} stroke={2} />}
+            </button>
+            <button
+              onClick={() => removeLayer(i)}
+              className="p-0.5 text-subtle hover:text-danger cursor-pointer"
+              title="Remove layer"
+            >
+              <IconTrash size={13} stroke={2} />
+            </button>
+          </div>
+          <div className="space-y-2 px-2.5 py-2">
+            <LayerFields
+              layer={layer}
+              update={(patch) => patchLayer(i, patch)}
+              updateTransient={(patch) => patchLayerTransient(i, patch)}
+              commit={commit}
+            />
+          </div>
+        </div>
+      ))}
+
+      {/* Add-effect picker */}
+      {addOpen ? (
+        <div className="mb-2">
+          <select
+            value=""
+            onChange={(e) => {
+              if (!e.target.value) return
+              addLayer(e.target.value as VideoEffectKind)
+              setAddOpen(false)
+            }}
+            className={SELECT_CLS}
+            autoFocus
+          >
+            <option value="">Choose an effect…</option>
+            {ALL_EFFECT_KINDS.map((k) => (
+              <option key={k} value={k}>{EFFECT_LABEL[k]}</option>
+            ))}
+          </select>
+          {layers.length > 0 && (
+            <button
+              onClick={() => setAddOpen(false)}
+              className="w-full mt-1 px-2 py-1 text-[11px] rounded bg-surface-muted text-muted hover:bg-surface-hover cursor-pointer transition-colors"
+            >
+              Cancel
+            </button>
+          )}
+        </div>
+      ) : (
+        <button
+          onClick={() => setAddOpen(true)}
+          className="w-full mb-2 flex items-center justify-center gap-1 px-3 py-1.5 text-xs bg-surface-muted hover:bg-surface-hover text-fg border border-border rounded transition-colors cursor-pointer"
+        >
+          <IconPlus size={14} stroke={2} /> Add effect
+        </button>
+      )}
+      {layers.length === 0 && !addOpen && (
+        <p className="text-[10px] text-subtle mb-2">This stack is empty — add an effect above.</p>
+      )}
+
+      {/* Shared timing envelope — identical shape to the zoom's; drives the whole stack's fade */}
       <Accordion title="Timing">
         <Field label="Start (s)">
           <NumberInput value={effect.startTime} min={0} step={0.1} onChange={(v) => update({ startTime: Math.max(0, v) })} />

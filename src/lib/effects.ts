@@ -1,4 +1,5 @@
 import type { VideoEffect, ResolvedEffect } from '../types'
+import { layersOf } from '../types'
 import { ease, clamp01 } from './easing'
 
 /**
@@ -20,8 +21,12 @@ export function effectEnvelope(e: VideoEffect): number {
   return e.transitionIn + e.hold + e.transitionOut
 }
 
-/** The eased intensity of one effect at `globalTime` (0 when outside its envelope). */
-function intensityAt(e: VideoEffect, globalTime: number): number {
+/**
+ * The eased envelope FACTOR (0–1) of a container at `globalTime` — 0 outside its envelope. This is the
+ * shared ramp the whole layer stack fades on (spec 37); each layer's resolved intensity is its own peak
+ * `intensity` multiplied by this factor.
+ */
+function envelopeFactorAt(e: VideoEffect, globalTime: number): number {
   const local = globalTime - e.startTime
   if (local < 0) return 0
   const inEnd = e.transitionIn
@@ -29,19 +34,21 @@ function intensityAt(e: VideoEffect, globalTime: number): number {
   const outEnd = holdEnd + e.transitionOut
 
   if (e.transitionIn > 0 && local < inEnd) {
-    return e.intensity * ease(e.easing, local / e.transitionIn)
+    return ease(e.easing, local / e.transitionIn)
   }
-  if (local < holdEnd) return e.intensity
+  if (local < holdEnd) return 1
   if (e.transitionOut > 0 && local < outEnd) {
-    return e.intensity * ease(e.easing, 1 - (local - holdEnd) / e.transitionOut)
+    return ease(e.easing, 1 - (local - holdEnd) / e.transitionOut)
   }
   return 0 // before the ease-in / after the ease-out
 }
 
 /**
- * Resolve the effect stack at `globalTime`. Filters hidden effects, drops any at intensity ≤ 0, and
- * returns the survivors ordered by startTime then id — a deterministic compose order (spec 23 Q4) so
- * colour filters concatenate and overlays stack the same way every render.
+ * Resolve the effect stack at `globalTime` (spec 37: containers of layers). For each non-hidden
+ * container active at `globalTime`, its shared envelope factor scales each non-hidden layer's peak
+ * intensity; layers at intensity ≤ 0 are dropped. Containers are ordered by startTime then id, and
+ * layers keep their in-container order — a deterministic compose order (spec 23 Q4) so colour filters
+ * concatenate and overlays stack the same way every render. Downstream still consumes ResolvedEffect[].
  */
 export function resolveEffects(effects: VideoEffect[] | undefined, globalTime: number): ResolvedEffect[] {
   if (!effects || effects.length === 0) return []
@@ -51,27 +58,32 @@ export function resolveEffects(effects: VideoEffect[] | undefined, globalTime: n
   const active: ResolvedEffect[] = []
   for (const e of ordered) {
     if (e.hidden) continue
-    const intensity = clamp01(intensityAt(e, globalTime))
-    if (intensity <= 0) continue
-    active.push({
-      kind: e.kind,
-      intensity,
-      vignette: e.vignette,
-      oldfilm: e.oldfilm,
-      hue: e.hue,
-      lightleak: e.lightleak,
-      chromatic: e.chromatic,
-      gradientmap: e.gradientmap,
-      posterize: e.posterize,
-      threshold: e.threshold,
-      channelswap: e.channelswap,
-      colorisolate: e.colorisolate,
-      dither: e.dither,
-      crt: e.crt,
-      vhs: e.vhs,
-      halftone: e.halftone,
-      comic: e.comic,
-    })
+    const factor = envelopeFactorAt(e, globalTime)
+    if (factor <= 0) continue
+    for (const layer of layersOf(e)) {
+      if (layer.hidden) continue
+      const intensity = clamp01(layer.intensity * factor)
+      if (intensity <= 0) continue
+      active.push({
+        kind: layer.kind,
+        intensity,
+        vignette: layer.vignette,
+        oldfilm: layer.oldfilm,
+        hue: layer.hue,
+        lightleak: layer.lightleak,
+        chromatic: layer.chromatic,
+        gradientmap: layer.gradientmap,
+        posterize: layer.posterize,
+        threshold: layer.threshold,
+        channelswap: layer.channelswap,
+        colorisolate: layer.colorisolate,
+        dither: layer.dither,
+        crt: layer.crt,
+        vhs: layer.vhs,
+        halftone: layer.halftone,
+        comic: layer.comic,
+      })
+    }
   }
   return active
 }

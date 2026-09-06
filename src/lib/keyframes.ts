@@ -3,6 +3,7 @@ import type {
   Keyframe, KeyframePose, EasingKind, Transition, SlideDirection,
   TextData, ArrowData, TextAlign, TextEffect,
 } from '../types'
+import { textEffectsOf } from '../types'
 import { ease, clamp01 } from './easing'
 import { lerpColor } from './color'
 
@@ -161,9 +162,17 @@ export const CHANNELS: ChannelSpec[] = [
     write: (o, v) => ({ data: { ...td(o), align: v as TextAlign } }),
   },
   {
+    // spec 37 (OQ2): only the FIRST layer of the text-effect stack is keyframable. Read/write target
+    // effects[0] (via textEffectsOf, so a legacy single `effect` still animates); the rest of the
+    // stack stays static. Writing normalizes to `effects` and clears the legacy `effect`.
     key: 'text.effect', label: 'Effect', section: 'Effects', interp: 'effect', types: TEXT,
-    read: (o) => td(o).effect,
-    write: (o, v) => ({ data: { ...td(o), effect: v as TextEffect | undefined } }),
+    read: (o) => textEffectsOf(td(o))[0],
+    write: (o, v) => {
+      const rest = textEffectsOf(td(o)).slice(1)
+      const first = v as TextEffect | undefined
+      const effects = first ? [first, ...rest] : rest
+      return { data: { ...td(o), effects, effect: undefined } }
+    },
   },
 
   // --- arrow data ---
@@ -536,16 +545,21 @@ type PoseUpdates = Partial<Omit<TimelineObject, 'id' | 'type'>>
 type ChannelOverrides = Partial<Record<AnimatableChannel, ChannelValue>>
 
 /**
- * Edit channels at clip-relative `t`. Every edit lands on something concrete:
- *  - a channel that does NOT yet animate → edits the object's BASE value (whole clip, spec 29 R9);
- *  - on an existing keyframe (within KF_EPS) → merges into THAT keyframe's declarations;
- *  - at the very start (t ≤ KF_EPS) → edits the base/home value, creating no keyframe;
- *  - anywhere else → CREATES a keyframe at the playhead declaring ONLY the edited channels, so the
- *    object genuinely passes through that value and every other channel keeps tweening through.
+ * Edit channels at clip-relative `t`. Editing NEVER creates a keyframe — keyframes are born only from
+ * the explicit `+ Keyframe` button (`addKeyframeAt`) or the ◆ toggle (`toggleChannel`). Every edit
+ * lands on something concrete:
+ *  - parked ON an existing keyframe (within KF_EPS) → merges into THAT keyframe's declarations;
+ *  - anywhere else (including the start, and mid-clip on an already-animated channel) → edits the
+ *    object's BASE value for the whole clip.
+ *
+ * Consequence (by design): nudging an ALREADY-animated pose channel mid-clip writes the base/home
+ * value, which won't visibly move the object at a scrub point past its first keyframe — to change an
+ * animated property at a given time, park on a keyframe or add one with the button. This is the
+ * deliberate replacement for the old "auto-create a keyframe on any off-keyframe edit" behaviour,
+ * which spawned unwanted keyframes whenever you tweaked something while scrubbed.
  */
 export function editChannel(obj: TimelineObject, overrides: ChannelOverrides, t: number): PoseUpdates {
   const keys = Object.keys(overrides) as AnimatableChannel[]
-  const animated = animatedChannels(obj)
   const kfs = obj.keyframes
   const idx = kfs ? kfs.findIndex((k) => Math.abs(k.time - t) < KF_EPS) : -1
 
@@ -554,10 +568,8 @@ export function editChannel(obj: TimelineObject, overrides: ChannelOverrides, t:
   for (const c of keys) {
     // Parked ON a keyframe: you are explicitly editing THAT keyframe (the panel says so), so any
     // property you touch is declared there — this is how a property gets animated without hunting
-    // for its ◆. Anywhere else, only channels that ALREADY animate get keyframed; everything else
-    // edits the base value for the whole clip, so a colour tweak mid-clip is never a surprise.
+    // for its ◆. Off a keyframe: edit the base value for the whole clip and NEVER auto-keyframe.
     if (idx >= 0) live.push(c)
-    else if (animated.has(c) && t > KF_EPS) live.push(c)
     else base.push(c)
   }
 
@@ -572,19 +584,11 @@ export function editChannel(obj: TimelineObject, overrides: ChannelOverrides, t:
     Object.assign(updates, u)
   }
 
-  if (live.length && kfs) {
-    if (idx >= 0) {
-      const props: ChannelOverrides = { ...(kfs[idx].props ?? {}) }
-      for (const c of live) props[c] = storeValue(overrides[c])
-      updates.keyframes = kfs.map((k, j) => (j === idx ? { ...k, props } : k))
-    } else {
-      const time = Math.max(0, t)
-      const props: ChannelOverrides = {}
-      for (const c of live) props[c] = storeValue(overrides[c])
-      const next = [...kfs, { time, props, easing: seedEasing(kfs, time), leadIn: seedLeadIn(kfs, time) }]
-      next.sort((a, b) => a.time - b.time)
-      updates.keyframes = next
-    }
+  // live is only ever populated when parked on a keyframe (idx >= 0): merge the edits into it.
+  if (live.length && kfs && idx >= 0) {
+    const props: ChannelOverrides = { ...(kfs[idx].props ?? {}) }
+    for (const c of live) props[c] = storeValue(overrides[c])
+    updates.keyframes = kfs.map((k, j) => (j === idx ? { ...k, props } : k))
   }
   return updates
 }
