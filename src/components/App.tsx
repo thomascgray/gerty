@@ -25,7 +25,7 @@ import type { TtsParams } from './TtsModal'
 import type { TtsResult } from '../lib/tts'
 import RecordModal from './RecordModal'
 import CaptionsModal from './CaptionsModal'
-import type { RecordResult } from './RecordModal'
+import { useMicRecorder, type RecordResult } from '../hooks/useMicRecorder'
 import ExportModal from './ExportModal'
 import AppearanceControls from './AppearanceControls'
 import HotkeysModal from './HotkeysModal'
@@ -57,7 +57,13 @@ const defaultTimelineHeight = () => clampTimelineHeight(Math.round(window.innerH
 
 export default function App() {
   const { project, dispatch, canUndo, canRedo, undo, redo, isDirty, markSaved } = useProject()
-  const playback = usePlayback(project)
+  // Live voiceover recording (spec 39): 'off' = normal editor; 'armed' = mic acquired, paused at the
+  // anchor, Space starts; 'recording' = capturing while the timeline plays. Declared before usePlayback
+  // so 'recording' can drive holdPastEnd (playhead keeps advancing past the end while recording).
+  const [recMode, setRecMode] = useState<'off' | 'armed' | 'recording'>('off')
+  const mic = useMicRecorder()
+  const recAnchorRef = useRef(0)
+  const playback = usePlayback(project, recMode === 'recording')
   const uiPrefs = useUiPrefs()
 
   // On startup: when persisting, restore asset blobs from IndexedDB; otherwise purge them. Without
@@ -386,16 +392,15 @@ export default function App() {
     }
   }, [ttsModal, project.objects, dispatch, playback.globalTime, addObjects])
 
-  // === Microphone recording (spec 34) ===
-  // Commit a mic take: store the recorded blob as an audio asset, then create the clip at the playhead.
+  // === Microphone recording (spec 34 modal + spec 39 live) ===
+  // Commit a mic take: store the recorded blob as an audio asset, then create the clip at `startTime`.
   // Same shape as handleTTSConfirm minus the tts/edit branches. Duration + waveform come from ONE
   // decode of the blob (AudioBuffer.duration is exact and sidesteps the MediaRecorder-WebM
   // `duration === Infinity` trap); the recorder's elapsed-time hint is the fallback if decode fails.
-  const handleRecordConfirm = useCallback(async (rec: RecordResult) => {
-    setShowRecord(false)
+  const addRecordedClip = useCallback(async (rec: RecordResult, startTime: number, name: string) => {
     const subtype = (rec.blob.type.split(';')[0].split('/')[1] || 'webm').toLowerCase()
     const ext = subtype === 'mp4' ? 'm4a' : subtype
-    const { meta, blob } = await storeAsset(new File([rec.blob], `Recording.${ext}`, { type: rec.blob.type }))
+    const { meta, blob } = await storeAsset(new File([rec.blob], `${name}.${ext}`, { type: rec.blob.type }))
 
     let duration = rec.duration
     let waveform: number[] | undefined
@@ -412,10 +417,75 @@ export default function App() {
     const obj = createTimelineObject(
       'audio',
       { assetId: meta.id, volume: 1, originalDuration: duration, waveform, sourceIn: 0, sourceOut: duration },
-      { startTime: playback.globalTime, duration, name: 'Recording' },
+      { startTime, duration, name },
     )
     addObjects([obj])
-  }, [dispatch, playback.globalTime, addObjects])
+    return name
+  }, [dispatch, addObjects])
+
+  // Modal record (spec 34): drop the take at the playhead as "Recording".
+  const handleRecordConfirm = useCallback(async (rec: RecordResult) => {
+    setShowRecord(false)
+    await addRecordedClip(rec, playback.globalTime, 'Recording')
+  }, [addRecordedClip, playback.globalTime])
+
+  // === Live voiceover recording (spec 39) ===
+  const canRecord = mic.supported
+
+  // Toggle record-armed mode. Entering: pause playback, remember the anchor (current playhead), and
+  // acquire the mic up front so the Space-to-start gesture has near-zero latency. Exiting: release
+  // the mic. Also used to exit when armed-but-not-recording (Escape / clicking the control again).
+  const toggleRecordArm = useCallback(async () => {
+    if (recMode !== 'off') {
+      // Exit — but never bail out from the middle of a recording this way (Escape cancels that path).
+      if (recMode === 'recording') return
+      mic.dispose()
+      setRecMode('off')
+      return
+    }
+    if (!canRecord) return
+    playback.pause()
+    recAnchorRef.current = playback.globalTime
+    const err = await mic.arm()
+    if (!err) setRecMode('armed')
+    else { pushToast(err, 'error'); setRecMode('off') }
+  }, [recMode, canRecord, mic, playback])
+
+  // Space (or the transport Record button) while armed: begin capture + playback together from the
+  // anchor. Uses resume() (no rewind, no empty-timeline guard) so recording starts at the playhead.
+  const startLiveRecording = useCallback(async () => {
+    recAnchorRef.current = playback.globalTime
+    const err = await mic.start()
+    if (err) { pushToast(err, 'error'); return }
+    setRecMode('recording')
+    playback.resume()
+  }, [mic, playback])
+
+  // Space (or Stop) while recording: stop capture + playback, commit the take at the anchor as
+  // "Voiceover N", and return to armed at the anchor for a one-key re-take.
+  const stopLiveRecording = useCallback(async () => {
+    playback.pause()
+    const anchor = recAnchorRef.current
+    const res = await mic.stop()
+    setRecMode('armed')
+    playback.seek(anchor)
+    if (!res) { pushToast('That recording was empty - try again.', 'error'); return }
+    const nums = project.objects
+      .map((o) => /^Voiceover (\d+)$/.exec(o.name))
+      .filter((m): m is RegExpExecArray => m != null)
+      .map((m) => Number(m[1]))
+    const n = (nums.length ? Math.max(...nums) : 0) + 1
+    const name = await addRecordedClip(res, anchor, `Voiceover ${n}`)
+    pushToast(`${name} added · Ctrl+Z to undo`, 'success')
+  }, [mic, playback, project.objects, addRecordedClip])
+
+  // Escape while recording: discard the take, release nothing (stay armed), return to the anchor.
+  const cancelLiveRecording = useCallback(() => {
+    playback.pause()
+    mic.cancel()
+    setRecMode('armed')
+    playback.seek(recAnchorRef.current)
+  }, [mic, playback])
 
   const handleCreateObject = useCallback((type: TimelineObjectType) => {
     const defaultData: Record<TimelineObjectType, () => ReturnType<typeof createTimelineObject>['data']> = {
@@ -616,9 +686,24 @@ export default function App() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return
 
+      // Any modal open (incl. the spec-34 record modal, which does its own mic capture) suppresses the
+      // live-record shortcut so we never open two microphone captures at once.
+      const anyModalOpen = showImport || !!ttsModal || showRecord || !!captionsModal || showExport || showHotkeys || showChangelog
+
       if (e.key === ' ') {
         e.preventDefault()
-        playback.togglePlayback()
+        // In record-armed mode Space starts/stops the live voiceover (spec 39); otherwise it is the
+        // normal play/pause toggle.
+        if (recMode === 'armed') startLiveRecording()
+        else if (recMode === 'recording') stopLiveRecording()
+        else playback.togglePlayback()
+      } else if ((e.key === 'r' || e.key === 'R') && !anyModalOpen) {
+        // Toggle live-voiceover record mode (no-op when recording is unsupported).
+        toggleRecordArm()
+      } else if (e.key === 'Escape' && recMode === 'recording') {
+        cancelLiveRecording()
+      } else if (e.key === 'Escape' && recMode === 'armed') {
+        toggleRecordArm()
       } else if (e.key === 'v') {
         toggleCameraView()
       } else if (e.key === 'm' || e.key === 'M') {
@@ -699,7 +784,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [playback, interactionMode, selectedObject, selectedObjectIds, selectedZoom, selectedEffectIds, selectedCaption, drawEnabled, dispatch, undo, redo, handleFinishArrow, toggleCameraView, handleAddMarker, handleStepMarker])
+  }, [playback, interactionMode, selectedObject, selectedObjectIds, selectedZoom, selectedEffectIds, selectedCaption, drawEnabled, dispatch, undo, redo, handleFinishArrow, toggleCameraView, handleAddMarker, handleStepMarker, recMode, startLiveRecording, stopLiveRecording, cancelLiveRecording, toggleRecordArm, showImport, ttsModal, showRecord, captionsModal, showExport, showHotkeys, showChangelog])
 
   // `additive` (shift-click from the timeline) toggles the id in/out of the multi-selection instead
   // of replacing it — letting the user gather clips across lanes to move them in time together.
@@ -951,6 +1036,13 @@ export default function App() {
               onAddMarkerAt={handleAddMarkerAt}
               onClearMarkers={handleClearMarkers}
               markerCount={project.markers?.length ?? 0}
+              canRecord={canRecord}
+              recMode={recMode}
+              recElapsed={mic.elapsed}
+              recLevel={mic.level}
+              onToggleArm={toggleRecordArm}
+              onRecordStartStop={recMode === 'recording' ? stopLiveRecording : startLiveRecording}
+              onExit={recMode === 'recording' ? cancelLiveRecording : toggleRecordArm}
             />
           </div>
         </div>

@@ -5,11 +5,17 @@ import type { Project } from '../types'
 const PREVIEW_SPEED_MIN = 0.25
 const PREVIEW_SPEED_MAX = 2
 
-export function usePlayback(project: Project) {
+export function usePlayback(project: Project, holdPastEnd = false) {
   const [isPlaying, setIsPlaying] = useState(false)
   const [globalTime, setGlobalTime] = useState(0)
   const rafRef = useRef<number>(0)
   const lastFrameTimeRef = useRef<number>(0)
+
+  // While a live voiceover is recording (spec 39) the playhead must keep advancing past the last
+  // object's end instead of auto-pausing, so the user can narrate a tail over the final frame. A ref
+  // so the rAF tick reads the live value without re-subscribing the loop.
+  const holdPastEndRef = useRef(holdPastEnd)
+  useEffect(() => { holdPastEndRef.current = holdPastEnd }, [holdPastEnd])
 
   // Editor-preview playback speed: scales how fast the playhead advances when you hit Play in the
   // app. A monitoring convenience only — export renders at real speed regardless. A ref lets the
@@ -51,12 +57,13 @@ export function usePlayback(project: Project) {
 
       setGlobalTime((prev) => {
         const next = prev + delta * playbackSpeedRef.current
-        if (next >= totalDurationRef.current) {
+        if (next >= totalDurationRef.current && !holdPastEndRef.current) {
           // Park on the last frame rather than rewinding — the playhead stays where
           // playback ended so you can inspect/edit the final frame.
           setIsPlaying(false)
           return totalDurationRef.current
         }
+        // While recording (holdPastEnd) keep advancing past the end into empty time.
         return next
       })
 
@@ -79,6 +86,10 @@ export function usePlayback(project: Project) {
     setIsPlaying(true)
   }, [rewindIfAtEnd])
   const pause = useCallback(() => setIsPlaying(false), [])
+  // Start playing from the current playhead WITHOUT the rewind-if-at-end behaviour and without the
+  // empty-timeline guard — used by the live voiceover recorder (spec 39), which anchors the take at
+  // the current playhead and (via holdPastEnd) keeps advancing past the end.
+  const resume = useCallback(() => setIsPlaying(true), [])
   const togglePlayback = useCallback(() => {
     if (totalDurationRef.current <= 0) return
     setIsPlaying((p) => {
@@ -100,6 +111,7 @@ export function usePlayback(project: Project) {
     totalDuration,
     play,
     pause,
+    resume,
     togglePlayback,
     seek,
     playbackSpeed,

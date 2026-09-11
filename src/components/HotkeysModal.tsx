@@ -15,7 +15,8 @@ const GROUPS: HotkeyGroup[] = [
   {
     title: 'Playback & navigation',
     items: [
-      { keys: ['Space'], label: 'Play / pause', desc: 'Toggle playback of the timeline from the current playhead position.' },
+      { keys: ['Space'], label: 'Play / pause', desc: 'Toggle playback from the current playhead. In record mode, Space starts and stops the live voiceover instead.' },
+      { keys: ['R'], label: 'Record voiceover', desc: 'Arm live voiceover recording at the playhead (grabs the mic). Space then starts recording over the playing timeline; Space again stops and drops the take as an audio clip. Esc discards. Press R again to leave record mode.' },
       { keys: ['V'], label: 'Toggle camera view', desc: 'Switch between Frame view (author zooms un-zoomed) and Live view (see the real push-in). Editing is disabled in Live view.' },
     ],
   },

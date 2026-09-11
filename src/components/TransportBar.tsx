@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useLayoutEffect } from 'react'
 import { createPortal } from 'react-dom'
-import { IconPlayerPlayFilled, IconPlayerPauseFilled, IconFlag, IconClockPlus, IconTrash } from '@tabler/icons-react'
+import { IconPlayerPlayFilled, IconPlayerPauseFilled, IconFlag, IconClockPlus, IconTrash, IconMicrophone, IconPlayerStopFilled, IconX } from '@tabler/icons-react'
 import VolumeControl from './VolumeControl'
 
 type TransportBarProps = {
@@ -20,6 +20,22 @@ type TransportBarProps = {
   onAddMarkerAt: (time: number) => void
   onClearMarkers: () => void
   markerCount: number
+  // Live voiceover recording (spec 39). recMode: 'off' shows a Record button that arms; 'armed'/
+  // 'recording' show the red record cluster (start/stop, timer, level meter, exit/cancel).
+  canRecord: boolean
+  recMode: 'off' | 'armed' | 'recording'
+  recElapsed: number
+  recLevel: number
+  onToggleArm: () => void
+  onRecordStartStop: () => void
+  // Exit record mode: when armed, leaves record mode; when recording, discards the take (Esc).
+  onExit: () => void
+}
+
+/** m:ss record timer. */
+function fmtRec(sec: number): string {
+  const s = Math.max(0, Math.floor(sec))
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
 
 /** m:ss.s clock — mirrors the timeline ruler's format. */
@@ -189,6 +205,7 @@ export default function TransportBar({
   isPlaying, onTogglePlayback, globalTime, totalDuration,
   playbackSpeed, onSetSpeed, volume, isMuted, onVolume, onToggleMute,
   onAddMarker, onAddMarkerAt, onClearMarkers, markerCount,
+  canRecord, recMode, recElapsed, recLevel, onToggleArm, onRecordStartStop, onExit,
 }: TransportBarProps) {
   return (
     <div className="pointer-events-auto flex items-center gap-3 px-2.5 py-1.5 bg-surface/95 border border-border rounded-full shadow-lg backdrop-blur-sm">
@@ -199,6 +216,57 @@ export default function TransportBar({
       >
         {isPlaying ? <IconPlayerPauseFilled size={16} /> : <IconPlayerPlayFilled size={16} />}
       </button>
+
+      {/* Live voiceover record (spec 39): a Record button that arms, then a red cluster while
+          armed/recording. Space starts/stops (handled in App); this mirrors it for mouse users. */}
+      {recMode === 'off' ? (
+        <button
+          onClick={canRecord ? onToggleArm : undefined}
+          disabled={!canRecord}
+          title={canRecord ? 'Record a voiceover over the timeline (R)' : 'Recording needs a secure page (HTTPS or localhost) and microphone support'}
+          aria-label="Record voiceover"
+          className="flex items-center justify-center w-8 h-8 rounded-full text-red-500 hover:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors shrink-0"
+        >
+          <IconMicrophone size={16} stroke={2} />
+        </button>
+      ) : (
+        <div
+          className="flex items-center gap-2 shrink-0 pl-1 pr-1.5 py-0.5 rounded-full bg-red-500/10 border border-red-500/40"
+          title={recMode === 'armed' ? 'Armed — press Space to start. Use headphones so the mic does not pick up your speakers.' : 'Recording — press Space to stop'}
+        >
+          <button
+            onClick={onRecordStartStop}
+            title={recMode === 'recording' ? 'Stop (Space)' : 'Start recording (Space)'}
+            aria-label={recMode === 'recording' ? 'Stop recording' : 'Start recording'}
+            className="flex items-center justify-center w-7 h-7 rounded-full bg-red-500 text-white hover:bg-red-600 cursor-pointer transition-colors shrink-0"
+          >
+            {recMode === 'recording'
+              ? <IconPlayerStopFilled size={14} />
+              : <span className="w-2.5 h-2.5 rounded-full bg-white" />}
+          </button>
+
+          {recMode === 'armed' ? (
+            <span className="text-[11px] font-medium text-red-400 select-none whitespace-nowrap">Ready · headphones</span>
+          ) : (
+            <>
+              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse shrink-0" />
+              <span className="text-xs font-mono tabular-nums text-fg w-9 text-right select-none">{fmtRec(recElapsed)}</span>
+              <span className="w-12 h-1.5 rounded-full bg-surface-muted overflow-hidden shrink-0">
+                <span className="block h-full bg-red-500 transition-[width] duration-75 ease-out" style={{ width: `${recLevel * 100}%` }} />
+              </span>
+            </>
+          )}
+
+          <button
+            onClick={onExit}
+            title={recMode === 'recording' ? 'Discard take (Esc)' : 'Exit record mode (Esc)'}
+            aria-label={recMode === 'recording' ? 'Discard take' : 'Exit record mode'}
+            className="flex items-center justify-center w-6 h-6 rounded-full text-muted hover:text-fg hover:bg-surface-hover cursor-pointer transition-colors shrink-0"
+          >
+            <IconX size={13} stroke={2} />
+          </button>
+        </div>
+      )}
 
       <span className="text-xs tabular-nums select-none whitespace-nowrap">
         <span className="text-fg">{formatClock(globalTime)}</span>
